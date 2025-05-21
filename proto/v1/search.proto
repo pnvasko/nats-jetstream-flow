@@ -1,0 +1,18 @@
+syntax = "proto3";
+
+
+package nats_jetstream_flow.search.v1;
+option go_package = "github.com/pnvasko/nats-jetstream-flow/proto";
+
+import "google/protobuf/timestamp.proto";
+import "github.com/planetscale/vtprotobuf@v0.6.0/include/github.com/planetscale/vtprotobuf/vtproto/ext.proto";
+
+
+message Search {
+  option (vtproto.mempool) = true;
+  int32 id = 1;
+  google.protobuf.Timestamp created_at = 2;
+  google.protobuf.Timestamp updated_at = 3;
+  int32 client_id = 4;
+  repeated string boards = 5;
+}

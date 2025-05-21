@@ -1,0 +1,20 @@
+syntax = "proto3";
+
+
+package nats_jetstream_flow.message.v1;
+option go_package = "github.com/pnvasko/nats-jetstream-flow/proto";
+
+import "google/protobuf/any.proto";
+import "github.com/planetscale/vtprotobuf@v0.6.0/include/github.com/planetscale/vtprotobuf/vtproto/ext.proto";
+
+message Message {
+  option (vtproto.mempool) = true;
+  string uuid = 1; // @gotags: json:"uuid"
+  map<string, string> metadata = 2; // @gotags: json:"metadata"
+  google.protobuf.Any payload = 5; // @gotags: json:"payload"
+}
+
+message Messages {
+  option (vtproto.mempool) = true;
+  repeated Message messages = 1; // @gotags: json:"message"
+}
