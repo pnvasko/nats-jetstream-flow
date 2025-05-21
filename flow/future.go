@@ -26,6 +26,12 @@ func (futures *Futures[T]) Await() []error {
 	return errs
 }
 
+func (futures *Futures[T]) Close() {
+	for _, f := range *futures {
+		f.CloseInner()
+	}
+}
+
 type Future[T any] struct {
 	ctx      context.Context
 	original T

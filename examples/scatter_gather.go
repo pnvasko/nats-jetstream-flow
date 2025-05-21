@@ -56,15 +56,165 @@ const (
 var totalSearchesSend int32 = 0
 var totalSearchesPull int32 = 0
 
+type serviceContext struct {
+	ctx          context.Context
+	cancel       context.CancelFunc
+	shutdownOnce sync.Once
+	nc           *nats.Conn
+	js           jetstream.JetStream
+	span         trace.Span
+	tracer       trace.Tracer
+	logger       *common.Logger
+}
+
+func initService(ctx context.Context, tracerName, serviceName, mainSpanName string, opts ...trace.SpanStartOption) (*serviceContext, error) {
+	var err error
+	sc := &serviceContext{}
+	otlpCfg, err := common.NewDevOtlpConfig()
+	if err != nil {
+		return nil, err
+	}
+	if err := common.InitOpentelemetry(otlpCfg); err != nil {
+		return nil, err
+	}
+
+	sc.logger, err = common.NewLogger(otlpCfg)
+	if err != nil {
+		return nil, err
+	}
+
+	sc.nc, err = nats.Connect(nats.DefaultURL)
+	if err != nil {
+		return nil, err
+	}
+	sc.js, err = jetstream.New(sc.nc)
+	if err != nil {
+		return nil, err
+	}
+	//tracerName = "workflow.map_reduce.cdc"
+	//serviceName = "workflow_map_reduce_cdc"
+	//mainSpanName = "cdc_main"
+
+	if tracerName == "" || serviceName == "" || mainSpanName == "" {
+		return nil, fmt.Errorf("tracer name, service name, and span name must be provided")
+	}
+
+	sc.tracer = otel.Tracer(tracerName)
+	var attributes []attribute.KeyValue
+	attributes = append(attributes, attribute.Key("service").String(serviceName))
+
+	var spanOpts []trace.SpanStartOption
+	spanOpts = append(spanOpts, opts...)
+	spanOpts = append(spanOpts, trace.WithSpanKind(trace.SpanKindServer))
+	spanOpts = append(spanOpts, trace.WithAttributes(attributes...))
+
+	mainCtx, mainSpan := sc.tracer.Start(ctx, mainSpanName, spanOpts...)
+	sc.ctx, sc.cancel = context.WithCancel(mainCtx)
+	sc.span = mainSpan
+
+	return sc, nil
+}
+
+func (sc *serviceContext) Shutdown() error {
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer shutdownCancel()
+	complete := make(chan struct{})
+	errCh := make(chan error, 1)
+
+	go func() {
+		sc.shutdownOnce.Do(func() {
+			defer close(complete)
+
+			if sc.cancel != nil {
+				sc.cancel()
+			}
+
+			if sc.nc != nil && !sc.nc.IsClosed() {
+				if err := sc.nc.Drain(); err != nil {
+					errCh <- fmt.Errorf("failed to drain nats connection %w", err)
+					return
+				}
+			}
+
+			sc.logger.Ctx(sc.ctx).Info("service shutdown")
+
+			if sc.span != nil {
+				sc.span.End()
+			}
+
+			if err := uptrace.ForceFlush(shutdownCtx); err != nil {
+				errCh <- fmt.Errorf("failed to force uptrace flush %w", err)
+				return
+			}
+
+			if err := uptrace.Shutdown(shutdownCtx); err != nil {
+				errCh <- fmt.Errorf("failed to uptrace shutdown %w", err)
+				return
+			}
+		})
+	}()
+
+	for {
+		select {
+		case <-shutdownCtx.Done():
+			// sc.logger.Ctx(shutdownCtx).Sugar().Errorf("failed shutdown service: %s", shutdownCtx.Err())
+			return shutdownCtx.Err()
+		case err := <-errCh:
+			return err
+		case <-complete:
+			return nil
+		}
+	}
+}
+
+func initStreams(ctx context.Context, js jetstream.JetStream, tracer trace.Tracer, logger *common.Logger) (err error) {
+	return nil
+}
+
 func main() {
 	cls := &cli.App{
 		Name:  "scatter-gather-flow",
 		Usage: "scatter-gather-flow runs scatter gather flow",
 		Commands: []*cli.Command{
+			serveCdcFlow,
 			serveScatterGatherFlow,
+			serveWorkerFlow,
 		},
 		Before: func(ctx *cli.Context) (err error) {
 			fmt.Println("before start service.")
+			sc, err := initService(c.Context, "workflow.map_reduce.init", "workflow_map_reduce_init", "init_main")
+			if err != nil {
+				return err
+			}
+			defer func() {
+				if err := sc.Shutdown(); err != nil {
+					fmt.Printf("failed to shutdown service: %s\n", err.Error())
+				}
+			}()
+
+			streamSearchesName := defaultWorkflowStreamName
+			streamSearchesCleanupTtl := defaultWorkflowStreamCleanupTtl
+
+			var streamSearchesSubjects []string
+			for _, sub := range strings.Split(defaultWorkflowStreamSubjects, ";") {
+				sub = strings.Trim(sub, " ")
+				if strings.HasSuffix(sub, " ") || strings.HasPrefix(sub, " ") {
+					fmt.Printf("invalid subject: %s\n", sub)
+				}
+				streamSearchesSubjects = append(streamSearchesSubjects, sub)
+			}
+			if len(streamSearchesSubjects) == 0 {
+				return fmt.Errorf("subjects list for stream [%s] is empty", defaultWorkflowStreamName)
+			}
+
+			var streamOpts []stream.StreamConfigOption
+			streamOpts = append(streamOpts, stream.WithCleanupTtl(streamSearchesCleanupTtl))
+			streamConfig, err := stream.NewStreamConfig(streamSearchesName, streamSearchesSubjects, streamOpts...)
+			_, err := stream.CreateOrUpdateStream(sc.ctx, sc.js, streamConfig)
+			if err != nil {
+				return err
+			}
+
 			return nil
 		},
 		After: func(ctx *cli.Context) error {
@@ -80,59 +230,181 @@ func main() {
 	}
 }
 
-var serveScatterGatherFlow = &cli.Command{
-	Name:  "serve",
-	Usage: "serve. run scatter gather flow...",
+var serveCdcFlow = &cli.Command{
+	Name:  "serve-cdc",
+	Usage: "serve-cdc. run cdc flow...",
 	Action: func(c *cli.Context) error {
-		actionCtx, actionCancel := context.WithCancel(c.Context)
-		defer actionCancel()
-
-		otlpCfg, err := common.NewDevOtlpConfig()
+		sc, err := initService(c.Context, "workflow.map_reduce.cdc", "workflow_map_reduce_cdc", "cdc_main")
 		if err != nil {
 			return err
 		}
-		if err := common.InitOpentelemetry(otlpCfg); err != nil {
-			return err
-		}
-		logger, err := common.NewLogger(otlpCfg)
-		if err != nil {
-			return err
-		}
-
-		nc, err := nats.Connect(nats.DefaultURL)
-		if err != nil {
-			return err
-		}
-		js, err := jetstream.New(nc)
-		if err != nil {
-			return err
-		}
-
-		tracer := otel.Tracer("flow.map_reduce")
-		var attributes []attribute.KeyValue
-		attributes = append(attributes, attribute.Key("service").String("map_reduce_flow"))
-		mainCtx, mainSpan := tracer.Start(actionCtx, "main",
-			trace.WithSpanKind(trace.SpanKindServer),
-			trace.WithAttributes(attributes...),
-		)
-		mainCtx, mainCancel := context.WithCancel(mainCtx)
-		defer mainCancel()
-
 		defer func() {
-			shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
-			defer shutdownCancel()
+			if err := sc.Shutdown(); err != nil {
+				fmt.Printf("failed to shutdown service: %s\n", err.Error())
+			}
+		}()
 
-			if err := nc.Drain(); err != nil {
-				logger.Ctx(shutdownCtx).Error("failed to drain nats connection", zap.Error(err))
+		cdc, err := NewCdcEmitter(sc.ctx, sc.js, sc.tracer, sc.logger)
+		if err != nil {
+			return err
+		}
+
+		sc.logger.Ctx(sc.ctx).Info("start emulate cdc flow...")
+
+		runGroup := common.NewRunGroup(10 * time.Second)
+
+		_ = runGroup.Add("CdcEmitter", func() error {
+			sc.logger.Ctx(sc.ctx).Sugar().Debugf("started cdc emitter.")
+			return cdc.Run()
+		}, func(err error) {
+			sc.logger.Ctx(c.Context).Sugar().Debugf("cdc emitter interrupt")
+			if err != nil {
+				sc.logger.Ctx(c.Context).Error("cdc emitter exit error:", zap.Error(err))
+			}
+			runCtx, closeCtxCancel := context.WithTimeout(c.Context, 5*time.Second)
+			defer closeCtxCancel()
+			if err := cdc.Close(runCtx); err != nil {
+				sc.logger.Ctx(c.Context).Error("cdc emitter close error", zap.Error(err))
+			}
+		})
+
+		return nil
+	},
+}
+
+var serveWorkerFlow = &cli.Command{
+	Name:  "serve-worker",
+	Usage: "serve-worker. run worker flow...",
+	Action: func(c *cli.Context) error {
+		sc, err := initService(c.Context, "workflow.map_reduce.worker", "workflow_map_reduce_worker", "worker_main")
+		if err != nil {
+			return err
+		}
+		defer func() {
+			if err := sc.Shutdown(); err != nil {
+				fmt.Printf("failed to shutdown service: %s\n", err.Error())
+			}
+		}()
+
+		streamSearchesName := defaultWorkflowStreamName
+		streamSearchesCleanupTtl := defaultWorkflowStreamCleanupTtl
+		var streamSearchesSubjects []string
+		for _, sub := range strings.Split(defaultWorkflowStreamSubjects, ";") {
+			sub = strings.Trim(sub, " ")
+			if strings.HasSuffix(sub, " ") || strings.HasPrefix(sub, " ") {
+				fmt.Printf("invalid subject: %s\n", sub)
+			}
+			streamSearchesSubjects = append(streamSearchesSubjects, sub)
+		}
+		if len(streamSearchesSubjects) == 0 {
+			return fmt.Errorf("subjects list for stream [%s] is empty", defaultWorkflowStreamName)
+		}
+
+		var streamOpts []stream.StreamConfigOption
+		streamOpts = append(streamOpts, stream.WithCleanupTtl(streamSearchesCleanupTtl))
+
+		var streamWorkerSourceOpts []stream.StreamSourceConfigOption
+		var consumerWorkerOpts []stream.ConsumerConfigOption
+		consumerWorkerOpts = append(consumerWorkerOpts, stream.WithDurableName(defaultWorkflowSearchWorkerDurableName))
+		consumerWorkerOpts = append(consumerWorkerOpts, stream.WithFilterSubjects([]string{fmt.Sprintf("%s.>", defaultWorkflowWorkerSubjects)}))
+		streamWorkerSourceConfig, err := stream.NewJetStreamSourceConfig(sc.js, streamSearchesName, streamSearchesSubjects, streamOpts, consumerWorkerOpts, streamWorkerSourceOpts...)
+		if err != nil {
+			return err
+		}
+
+		streamWorkerSource, err := stream.NewStreamSource[*proto.Search](sc.ctx, "worker_search_source", sc.js, streamWorkerSourceConfig, sc.tracer, sc.logger)
+		if err != nil {
+			return err
+		}
+
+		sc.logger.Ctx(sc.ctx).Info("start worker flow...")
+
+		runGroup := common.NewRunGroup(10 * time.Second)
+
+		_ = runGroup.Add("WorkerSource", func() error {
+			sc.logger.Ctx(sc.ctx).Sugar().Debugf("started worker stream flow.")
+			if err := streamWorkerSource.Run(); err != nil {
+				return err
 			}
 
-			mainSpan.End()
-
-			if err := uptrace.ForceFlush(shutdownCtx); err != nil {
-				logger.Ctx(shutdownCtx).Sugar().Errorf("failed to force uptrace flush: %s", err.Error())
+			workerSink := flow.NewChanSink(sc.ctx)
+			err = workerSink.Run()
+			if err != nil {
+				return err
 			}
-			if err := uptrace.Shutdown(shutdownCtx); err != nil {
-				logger.Ctx(shutdownCtx).Sugar().Errorf("failed to uptrace shutdown: %s", err.Error())
+
+			waitWorkerSinkOut := make(chan struct{})
+			go func() {
+				defer close(waitWorkerSinkOut)
+
+				for {
+					select {
+					case <-sc.ctx.Done():
+						return
+					case jsMsg, ok := <-workerSink.Out():
+						if !ok {
+							sc.logger.Ctx(sc.ctx).Sugar().Debugf("workerSink. worker sink closed")
+						}
+						msg, ok := jsMsg.(*stream.Message)
+						if !ok {
+							sc.logger.Ctx(sc.ctx).Sugar().Debugf("workerSink get stream message failed, not suuport message type: %T", msg)
+							return
+						}
+
+						subject, err := msg.Subject()
+						if err != nil {
+							sc.logger.Ctx(sc.ctx).Sugar().Debugf("workerSink get stream message subject failed, not suuport message type: %T", msg)
+							continue
+						}
+						atomic.AddInt32(&totalSearchesPull, 1)
+						if ok := msg.Ack(); ok {
+							fmt.Printf("workerSink. ack stream message success subject: %s\n", subject)
+							sc.logger.Ctx(sc.ctx).Sugar().Debugf("workerSink. ack stream message success subject: %s", subject)
+						} else {
+							sc.logger.Ctx(sc.ctx).Sugar().Errorf("workerSink. ack stream message failed subject: %s", subject)
+						}
+					}
+				}
+			}()
+
+			waitStreamWorkerFlow := make(chan struct{})
+			go func() {
+				defer func() {
+					close(waitStreamWorkerFlow)
+				}()
+
+				streamWorkerSource.
+					Via(flow.NewPassThrough()).
+					To(workerSink)
+			}()
+
+			select {
+			case <-waitWorkerSinkOut:
+				sc.logger.Ctx(sc.ctx).Sugar().Debugf("worker sink error, waitWorkerSinkOut closed")
+				return fmt.Errorf("worker sink error, worker sink out closed")
+			case <-waitStreamWorkerFlow:
+				sc.logger.Ctx(sc.ctx).Sugar().Debugf("worker sink error, waitStreamWorkerFlow closed")
+			}
+			return nil
+		}, func(err error) {
+			sc.logger.Ctx(c.Context).Sugar().Debugf("stream worker flow interrupt")
+		})
+
+		return nil
+	},
+}
+
+var serveScatterGatherFlow = &cli.Command{
+	Name:  "serve-scatter-gather",
+	Usage: "serve-scatter-gather. run scatter gather flow...",
+	Action: func(c *cli.Context) error {
+		sc, err := initService(c.Context, "workflow.map_reduce.cdc", "workflow_map_reduce_cdc", "cdc_main")
+		if err != nil {
+			return err
+		}
+		defer func() {
+			if err := sc.Shutdown(); err != nil {
+				fmt.Printf("failed to shutdown service: %s\n", err.Error())
 			}
 		}()
 
@@ -155,41 +427,27 @@ var serveScatterGatherFlow = &cli.Command{
 		var streamOpts []stream.StreamConfigOption
 		streamOpts = append(streamOpts, stream.WithCleanupTtl(streamSearchesCleanupTtl))
 		streamConfig, err := stream.NewStreamConfig(streamSearchesName, streamSearchesSubjects, streamOpts...)
-		_, err = stream.CreateOrUpdateStream(mainCtx, js, streamConfig)
 		if err != nil {
 			return err
 		}
-
-		// Debug
-		cdc, err := NewCdcEmitter(mainCtx, js, tracer, logger)
-		if err != nil {
-			return err
-		}
-		var streamWorkerSourceOpts []stream.StreamSourceConfigOption
-		var consumerWorkerOpts []stream.ConsumerConfigOption
-		consumerWorkerOpts = append(consumerWorkerOpts, stream.WithDurableName(defaultWorkflowSearchWorkerDurableName))
-		consumerWorkerOpts = append(consumerWorkerOpts, stream.WithFilterSubjects([]string{fmt.Sprintf("%s.>", defaultWorkflowWorkerSubjects)}))
-		streamWorkerSourceConfig, err := stream.NewJetStreamSourceConfig(js, streamSearchesName, streamSearchesSubjects, streamOpts, consumerWorkerOpts, streamWorkerSourceOpts...)
-		if err != nil {
-			return err
-		}
-		streamWorkerSource, err := stream.NewStreamSource[*proto.Search](mainCtx, "worker_search_source", js, streamWorkerSourceConfig, tracer, logger)
-		if err != nil {
-			return err
-		}
-		// Debug
 
 		var streamSourceOpts []stream.StreamSourceConfigOption
 		var consumerOpts []stream.ConsumerConfigOption
 		consumerOpts = append(consumerOpts, stream.WithDurableName(streamSearchesDurableName))
 		consumerOpts = append(consumerOpts, stream.WithFilterSubjects([]string{fmt.Sprintf("%s.*", defaultSearchCDCSubject)}))
-		streamSourceConfig, err := stream.NewJetStreamSourceConfig(js, streamSearchesName, streamSearchesSubjects, streamOpts, consumerOpts, streamSourceOpts...)
+		streamSourceConfig, err := stream.NewJetStreamSourceConfig(sc.js, streamSearchesName, streamSearchesSubjects, streamOpts, consumerOpts, streamSourceOpts...)
 		if err != nil {
 			return err
 		}
-		streamSource, err := stream.NewStreamSource[*proto.Search](mainCtx, "distributor_search_source", js, streamSourceConfig, tracer, logger)
+		streamSource, err := stream.NewStreamSource[*proto.Search](sc.ctx, "distributor_search_source", sc.js, streamSourceConfig, sc.tracer, sc.logger)
 		if err != nil {
 			return err
+		}
+
+		if err := streamSource.PurgeStream(); err != nil {
+			sc.logger.Ctx(sc.ctx).Sugar().Errorf("purge worker stream error: %v", err)
+		} else {
+			sc.logger.Ctx(sc.ctx).Sugar().Warnf("worker stream purged successfully.")
 		}
 
 		sinkConfig, err := stream.NewStreamSinkConfig(streamConfig)
@@ -254,7 +512,12 @@ var serveScatterGatherFlow = &cli.Command{
 			}
 		}
 
-		sink, err := stream.NewStreamSinkProducer[*stream.Message](mainCtx, "distributor_search_sink", js, producerSplitFunction, sinkConfig, tracer, logger)
+		completeHandler := func(ctx context.Context, js jetstream.JetStream, future *flow.Future[*stream.Message], tracer trace.Tracer, logger *common.Logger) error {
+			fmt.Printf("completeHandler\n")
+			return nil
+		}
+
+		sink, err := stream.NewStreamSinkProducer[*stream.Message](sc.ctx, "distributor_search_sink", sc.js, producerSplitFunction, completeHandler, sinkConfig, sc.tracer, sc.logger)
 		if err != nil {
 			return err
 		}
@@ -312,67 +575,53 @@ var serveScatterGatherFlow = &cli.Command{
 			return msgs, nil
 		}
 
-		toSplitMapFlow, err := flow.NewMap(mainCtx, splitMapTransformer, 100, tracer, logger)
+		toSplitMapFlow, err := flow.NewMap(sc.ctx, splitMapTransformer, 100, sc.tracer, sc.logger)
 		if err != nil {
 			return err
 		}
 
-		logger.Ctx(mainCtx).Info("start scatter gather flow...")
+		sc.logger.Ctx(sc.ctx).Info("start scatter gather flow...")
 
 		runGroup := common.NewRunGroup(10 * time.Second)
-		_ = runGroup.Add("CdcEmitter", func() error {
-			logger.Ctx(mainCtx).Sugar().Debugf("started cdc emitter.")
-			return cdc.Run()
-		}, func(err error) {
-			logger.Ctx(c.Context).Sugar().Debugf("cdc emitter interrupt")
-			if err != nil {
-				logger.Ctx(c.Context).Error("cdc emitter exit error:", zap.Error(err))
-			}
-			runCtx, closeCtxCancel := context.WithTimeout(c.Context, 5*time.Second)
-			defer closeCtxCancel()
-			if err := cdc.Close(runCtx); err != nil {
-				logger.Ctx(c.Context).Error("cdc emitter close error", zap.Error(err))
-			}
-		})
 
 		_ = runGroup.Add("StreamSource", func() error {
-			logger.Ctx(mainCtx).Sugar().Debugf("started stream source.")
+			sc.logger.Ctx(sc.ctx).Sugar().Debugf("started stream source.")
 			if err := streamSource.Run(); err != nil {
 				return err
 			}
 			return streamSource.Complete()
 		}, func(err error) {
-			logger.Ctx(c.Context).Sugar().Debugf("stream source interrupt")
+			sc.logger.Ctx(c.Context).Sugar().Debugf("stream source interrupt")
 			if err != nil {
-				logger.Ctx(c.Context).Error("stream source exit error:", zap.Error(err))
+				sc.logger.Ctx(c.Context).Error("stream source exit error:", zap.Error(err))
 			}
 			runCtx, closeCtxCancel := context.WithTimeout(c.Context, 60*time.Second)
 			defer closeCtxCancel()
 			if err := streamSource.Close(runCtx); err != nil {
-				logger.Ctx(c.Context).Error("stream source close error", zap.Error(err))
+				sc.logger.Ctx(c.Context).Error("stream source close error", zap.Error(err))
 			}
 		})
 
 		_ = runGroup.Add("Sink", func() error {
-			logger.Ctx(mainCtx).Sugar().Debugf("started stream sink.")
+			sc.logger.Ctx(sc.ctx).Sugar().Debugf("started stream sink.")
 			if err := sink.Run(); err != nil {
 				return err
 			}
 			return sink.Complete()
 		}, func(err error) {
-			logger.Ctx(c.Context).Sugar().Debugf("stream sink interrupt")
+			sc.logger.Ctx(c.Context).Sugar().Debugf("stream sink interrupt")
 			if err != nil {
-				logger.Ctx(c.Context).Error("stream sink exit error:", zap.Error(err))
+				sc.logger.Ctx(c.Context).Error("stream sink exit error:", zap.Error(err))
 			}
 			runCtx, closeCtxCancel := context.WithTimeout(c.Context, 60*time.Second)
 			defer closeCtxCancel()
 			if err := sink.Close(runCtx); err != nil {
-				logger.Ctx(c.Context).Error("stream sink close error", zap.Error(err))
+				sc.logger.Ctx(c.Context).Error("stream sink close error", zap.Error(err))
 			}
 		})
 
 		_ = runGroup.Add("Flow", func() error {
-			logger.Ctx(mainCtx).Sugar().Debugf("started stream flow.")
+			sc.logger.Ctx(sc.ctx).Sugar().Debugf("started stream flow.")
 			if err := toSplitMapFlow.Run(); err != nil {
 				return err
 			}
@@ -382,103 +631,28 @@ var serveScatterGatherFlow = &cli.Command{
 				To(sink)
 			return nil
 		}, func(err error) {
-			logger.Ctx(c.Context).Sugar().Debugf("stream flow interrupt")
-		})
-
-		_ = runGroup.Add("WorkerSource", func() error {
-			logger.Ctx(mainCtx).Sugar().Debugf("started worker stream flow.")
-			if err := streamWorkerSource.Run(); err != nil {
-				return err
-			}
-
-			if err := streamSource.PurgeStream(); err != nil {
-				logger.Ctx(mainCtx).Sugar().Errorf("purge worker stream error: %v", err)
-			} else {
-				logger.Ctx(mainCtx).Sugar().Warnf("worker stream purged successfully.")
-			}
-
-			workerSink := flow.NewChanSink(mainCtx)
-			err = workerSink.Run()
-			if err != nil {
-				return err
-			}
-
-			waitWorkerSinkOut := make(chan struct{})
-			go func() {
-				defer close(waitWorkerSinkOut)
-
-				for {
-					select {
-					case <-mainCtx.Done():
-						return
-					case jsMsg, ok := <-workerSink.Out():
-						if !ok {
-							logger.Ctx(mainCtx).Sugar().Debugf("workerSink. worker sink closed")
-						}
-						msg, ok := jsMsg.(*stream.Message)
-						if !ok {
-							logger.Ctx(mainCtx).Sugar().Debugf("workerSink get stream message failed, not suuport message type: %T", msg)
-							return
-						}
-
-						subject, err := msg.Subject()
-						if err != nil {
-							logger.Ctx(mainCtx).Sugar().Debugf("workerSink get stream message subject failed, not suuport message type: %T", msg)
-							continue
-						}
-						atomic.AddInt32(&totalSearchesPull, 1)
-						if ok := msg.Ack(); ok {
-							fmt.Printf("workerSink. ack stream message success subject: %s\n", subject)
-							logger.Ctx(mainCtx).Sugar().Debugf("workerSink. ack stream message success subject: %s", subject)
-						} else {
-							logger.Ctx(mainCtx).Sugar().Errorf("workerSink. ack stream message failed subject: %s", subject)
-						}
-					}
-				}
-			}()
-
-			waitStreamWorkerFlow := make(chan struct{})
-			go func() {
-				defer func() {
-					close(waitStreamWorkerFlow)
-				}()
-
-				streamWorkerSource.
-					Via(flow.NewPassThrough()).
-					To(workerSink)
-			}()
-
-			select {
-			case <-waitWorkerSinkOut:
-				logger.Ctx(mainCtx).Sugar().Debugf("worker sink error, waitWorkerSinkOut closed")
-				return fmt.Errorf("worker sink error, worker sink out closed")
-			case <-waitStreamWorkerFlow:
-				logger.Ctx(mainCtx).Sugar().Debugf("worker sink error, waitStreamWorkerFlow closed")
-			}
-			return nil
-		}, func(err error) {
-			logger.Ctx(c.Context).Sugar().Debugf("stream flow interrupt")
+			sc.logger.Ctx(c.Context).Sugar().Debugf("stream flow interrupt")
 		})
 
 		_ = runGroup.Add("SystemInterrupt", func() error {
-			logger.Ctx(actionCtx).Sugar().Debugf("started system interrupt.")
+			sc.logger.Ctx(sc.ctx).Sugar().Debugf("started system interrupt.")
 			term := make(chan os.Signal, 32)
 			signal.Notify(term, os.Interrupt, unix.SIGINT, unix.SIGQUIT, unix.SIGTERM)
 			select {
 			case <-term:
-			case <-actionCtx.Done():
+			case <-sc.ctx.Done():
 			}
 			return nil
 		}, func(err error) {
-			logger.Ctx(actionCtx).Sugar().Debugf("system interrupted")
+			sc.logger.Ctx(sc.ctx).Sugar().Debugf("system interrupted")
 			if err != nil && !(errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)) {
-				logger.Ctx(actionCtx).Error("system interrupt error:", zap.Error(err))
+				sc.logger.Ctx(sc.ctx).Error("system interrupt error:", zap.Error(err))
 			}
-			mainCancel()
+			sc.cancel()
 		})
 
-		if err := runGroup.Run(mainCtx); err != nil && !(errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)) {
-			logger.Ctx(actionCtx).Sugar().Errorf("run group error: %v", err)
+		if err := runGroup.Run(sc.ctx); err != nil && !(errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)) {
+			sc.logger.Ctx(sc.ctx).Sugar().Errorf("run group error: %v", err)
 			return err
 		}
 

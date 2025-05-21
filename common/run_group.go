@@ -4,6 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"golang.org/x/sys/unix"
+	"os"
+	"os/signal"
 	"sync"
 	"time"
 )
@@ -15,15 +18,19 @@ type actor struct {
 }
 
 type RunGroup struct {
-	mu          sync.Mutex
-	actors      []actor
-	stopTimeout time.Duration
-	started     bool
+	ctx             context.Context
+	cancel          context.CancelFunc
+	mu              sync.Mutex
+	actors          []actor
+	systemInterrupt bool
+	stopTimeout     time.Duration
+	started         bool
 }
 
-func NewRunGroup(stopTimeout time.Duration) *RunGroup {
+func NewRunGroup(systemInterrupt bool, stopTimeout time.Duration) *RunGroup {
 	return &RunGroup{
-		stopTimeout: stopTimeout,
+		systemInterrupt: systemInterrupt,
+		stopTimeout:     stopTimeout,
 	}
 }
 
@@ -40,8 +47,14 @@ func (g *RunGroup) Add(name string, execute func() error, interrupt func(error))
 func (g *RunGroup) Run(baseCtx context.Context) error {
 	g.mu.Lock()
 	g.started = true
+	g.ctx, g.cancel = context.WithCancel(baseCtx)
 	g.mu.Unlock()
 
+	if g.systemInterrupt {
+		if err := g.interrupt(); err != nil {
+			return err
+		}
+	}
 	var err error
 	var closeOnceDone sync.Once
 
@@ -72,6 +85,8 @@ func (g *RunGroup) Run(baseCtx context.Context) error {
 	select {
 	case err = <-executeErrors:
 	case <-executeComplete:
+	case <-g.ctx.Done():
+		err = g.ctx.Err()
 	case <-baseCtx.Done():
 		err = baseCtx.Err()
 	}
@@ -98,4 +113,23 @@ func (g *RunGroup) Run(baseCtx context.Context) error {
 	case <-stopCtx.Done():
 		return stopCtx.Err()
 	}
+}
+
+func (g *RunGroup) interrupt() error {
+	if !g.started || g.cancel == nil {
+		return fmt.Errorf("cannot interrupt RunGroup before Run has started")
+	}
+
+	go func() {
+		defer g.cancel()
+		term := make(chan os.Signal, 32)
+		signal.Notify(term, os.Interrupt, unix.SIGINT, unix.SIGQUIT, unix.SIGTERM)
+		select {
+		case <-term:
+		case <-g.ctx.Done():
+		}
+		return
+	}()
+
+	return nil
 }

@@ -350,6 +350,12 @@ LOOP:
 					if ok := message.OriginalMessage.Ack(); !ok {
 						fmt.Println("StreamProducerSink.process.messages: failed to Ack message")
 					}
+					ss.wg.Add(1)
+					if err := ss.completePool.Invoke(futures); err != nil {
+						ss.logger.Ctx(ctx).Warn("stream sink failed to invoke processing function for input messages", zap.Error(err))
+						future.CloseInner()
+						return
+					}
 				} else {
 					if ok := message.OriginalMessage.Nack(); !ok {
 						fmt.Println("StreamProducerSink.process.messages: failed to Nack message")
