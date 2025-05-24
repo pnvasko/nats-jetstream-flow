@@ -19,45 +19,7 @@ const (
 	defaultProducerSinkPublishAsyncWait = 10 * time.Millisecond
 )
 
-type SinkConsumeFunction[T any] func(ctx context.Context, js jetstream.JetStream, future *flow.Future[T], tracer trace.Tracer, logger *common.Logger) error
-
-func BaseJsConsumeFunction[T *Message](ctx context.Context, js jetstream.JetStream, future *flow.Future[*Message], tracer trace.Tracer, logger *common.Logger) error {
-	msg := future.Original()
-	fmt.Printf("StreamProducerSink.consumePool %T: %+v\n", msg, msg)
-
-	subject, err := msg.Subject()
-	if err != nil {
-		logger.Ctx(ctx).Error("stream sink producer failed get subject", zap.Error(err))
-		return err
-	}
-
-	fmt.Println("todo.consumePool.NewStreamProducerSink.subject: ", subject)
-	data, err := msg.Marshal()
-	if err != nil {
-		logger.Ctx(ctx).Error("stream sink producer message marshal failed", zap.Error(err))
-		return err
-	}
-	ack, err := js.PublishAsync(subject, data)
-	if err != nil {
-		logger.Ctx(ctx).Error("stream sink producer publish message failed", zap.Error(err))
-		return err
-	}
-
-	select {
-	case <-future.Context().Done():
-		return future.Context().Err()
-	case <-msg.Context().Done():
-		return msg.Context().Err()
-	case <-ctx.Done():
-		return ctx.Err()
-	case <-ack.Ok():
-		return nil
-	case err := <-ack.Err():
-		return err
-	case <-time.After(defaultProducerSinkPublishAsyncWait):
-		return fmt.Errorf("timeout publish message ")
-	}
-}
+type SinkConsumeFunction[T any] func(ctx context.Context, future *flow.Future[T]) error
 
 type StreamSinkConfig struct {
 	*StreamConfig
@@ -193,8 +155,9 @@ func NewStreamSinkProducer[T flow.Message](ctx context.Context,
 			}
 			msgSpan.End()
 		}()
-		// func(ctx context.Context, subject string, data []byte) error
-		if err := ss.consumeHandler(msgSpanCtx, js, future, ss.tracer, ss.logger); err != nil {
+
+		// if err := ss.consumeHandler(msgSpanCtx, js, future, ss.tracer, ss.logger); err != nil {
+		if err := ss.consumeHandler(msgSpanCtx, future); err != nil {
 			future.SetError(err)
 			msgSpan.SetStatus(codes.Error, err.Error())
 			return
@@ -220,7 +183,8 @@ func NewStreamSinkProducer[T flow.Message](ctx context.Context,
 			}
 			msgSpan.End()
 		}()
-		if err := ss.completeHandler(msgSpanCtx, js, future, ss.tracer, ss.logger); err != nil {
+		// if err := ss.completeHandler(msgSpanCtx, js, future, ss.tracer, ss.logger); err != nil {
+		if err := ss.completeHandler(msgSpanCtx, future); err != nil {
 			future.SetError(err)
 			msgSpan.SetStatus(codes.Error, err.Error())
 			return
@@ -350,10 +314,10 @@ LOOP:
 					if ok := message.OriginalMessage.Ack(); !ok {
 						fmt.Println("StreamProducerSink.process.messages: failed to Ack message")
 					}
+
 					ss.wg.Add(1)
 					if err := ss.completePool.Invoke(futures); err != nil {
 						ss.logger.Ctx(ctx).Warn("stream sink failed to invoke processing function for input messages", zap.Error(err))
-						future.CloseInner()
 						return
 					}
 				} else {

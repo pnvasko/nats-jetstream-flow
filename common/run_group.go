@@ -50,6 +50,8 @@ func (g *RunGroup) Run(baseCtx context.Context) error {
 	g.ctx, g.cancel = context.WithCancel(baseCtx)
 	g.mu.Unlock()
 
+	ctx := g.ctx
+
 	if g.systemInterrupt {
 		if err := g.interrupt(); err != nil {
 			return err
@@ -81,12 +83,12 @@ func (g *RunGroup) Run(baseCtx context.Context) error {
 		}(a)
 	}
 
-	// Wait for the first actor to stop or contex cancel.
+	// Wait for the first actor to stop or context cancel.
 	select {
 	case err = <-executeErrors:
 	case <-executeComplete:
-	case <-g.ctx.Done():
-		err = g.ctx.Err()
+	case <-ctx.Done():
+		err = ctx.Err()
 	case <-baseCtx.Done():
 		err = baseCtx.Err()
 	}
@@ -121,9 +123,19 @@ func (g *RunGroup) interrupt() error {
 	}
 
 	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				fmt.Fprintf(os.Stderr, "panic in signal handler: %v\n", r)
+			}
+		}()
+
 		defer g.cancel()
 		term := make(chan os.Signal, 32)
 		signal.Notify(term, os.Interrupt, unix.SIGINT, unix.SIGQUIT, unix.SIGTERM)
+		defer func() {
+			signal.Stop(term)
+			close(term)
+		}()
 		select {
 		case <-term:
 		case <-g.ctx.Done():

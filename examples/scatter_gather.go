@@ -8,6 +8,7 @@ import (
 	"github.com/nats-io/nats.go/jetstream"
 	stream "github.com/pnvasko/nats-jetstream-flow"
 	"github.com/pnvasko/nats-jetstream-flow/common"
+	"github.com/pnvasko/nats-jetstream-flow/examples/handlers"
 	"github.com/pnvasko/nats-jetstream-flow/flow"
 	"github.com/pnvasko/nats-jetstream-flow/proto/v1"
 	"github.com/rs/xid"
@@ -17,10 +18,8 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
 	"go.uber.org/zap"
-	"golang.org/x/sys/unix"
 	"math/rand"
 	"os"
-	"os/signal"
 	"strconv"
 	"strings"
 	"sync"
@@ -46,11 +45,9 @@ const (
 	templateSearchWorkerSubject            = "worker.%s.search.new.%d"
 	defaultWorkflowWorkerSubjects          = "worker"
 
-	parentMsgIdKey       = "_parent_msg_id_key"
-	originalSearchIdKey  = "_original_search_id_key"
-	originalBoardKey     = "_original_board_key"
-	originalNatsMsgIdKey = "_original_nats_msg_id_key"
-	debugFailedKey       = "_debug_failed_key"
+	parentMsgIdKey      = "_parent_msg_id_key"
+	originalSearchIdKey = "_original_search_id_key"
+	originalBoardKey    = "_original_board_key"
 )
 
 var totalSearchesSend int32 = 0
@@ -167,10 +164,6 @@ func (sc *serviceContext) Shutdown() error {
 	}
 }
 
-func initStreams(ctx context.Context, js jetstream.JetStream, tracer trace.Tracer, logger *common.Logger) (err error) {
-	return nil
-}
-
 func main() {
 	cls := &cli.App{
 		Name:  "scatter-gather-flow",
@@ -182,7 +175,7 @@ func main() {
 		},
 		Before: func(ctx *cli.Context) (err error) {
 			fmt.Println("before start service.")
-			sc, err := initService(c.Context, "workflow.map_reduce.init", "workflow_map_reduce_init", "init_main")
+			sc, err := initService(context.Background(), "workflow.map_reduce.init", "workflow_map_reduce_init", "init_main")
 			if err != nil {
 				return err
 			}
@@ -210,7 +203,7 @@ func main() {
 			var streamOpts []stream.StreamConfigOption
 			streamOpts = append(streamOpts, stream.WithCleanupTtl(streamSearchesCleanupTtl))
 			streamConfig, err := stream.NewStreamConfig(streamSearchesName, streamSearchesSubjects, streamOpts...)
-			_, err := stream.CreateOrUpdateStream(sc.ctx, sc.js, streamConfig)
+			_, err = stream.CreateOrUpdateStream(sc.ctx, sc.js, streamConfig)
 			if err != nil {
 				return err
 			}
@@ -251,7 +244,7 @@ var serveCdcFlow = &cli.Command{
 
 		sc.logger.Ctx(sc.ctx).Info("start emulate cdc flow...")
 
-		runGroup := common.NewRunGroup(10 * time.Second)
+		runGroup := common.NewRunGroup(true, 10*time.Second)
 
 		_ = runGroup.Add("CdcEmitter", func() error {
 			sc.logger.Ctx(sc.ctx).Sugar().Debugf("started cdc emitter.")
@@ -267,6 +260,11 @@ var serveCdcFlow = &cli.Command{
 				sc.logger.Ctx(c.Context).Error("cdc emitter close error", zap.Error(err))
 			}
 		})
+
+		if err := runGroup.Run(sc.ctx); err != nil && !(errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)) {
+			sc.logger.Ctx(sc.ctx).Sugar().Errorf("run group error: %v", err)
+			return err
+		}
 
 		return nil
 	},
@@ -319,7 +317,7 @@ var serveWorkerFlow = &cli.Command{
 
 		sc.logger.Ctx(sc.ctx).Info("start worker flow...")
 
-		runGroup := common.NewRunGroup(10 * time.Second)
+		runGroup := common.NewRunGroup(true, 10*time.Second)
 
 		_ = runGroup.Add("WorkerSource", func() error {
 			sc.logger.Ctx(sc.ctx).Sugar().Debugf("started worker stream flow.")
@@ -390,6 +388,11 @@ var serveWorkerFlow = &cli.Command{
 			sc.logger.Ctx(c.Context).Sugar().Debugf("stream worker flow interrupt")
 		})
 
+		if err := runGroup.Run(sc.ctx); err != nil && !(errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)) {
+			sc.logger.Ctx(sc.ctx).Sugar().Errorf("run group error: %v", err)
+			return err
+		}
+
 		return nil
 	},
 }
@@ -452,78 +455,23 @@ var serveScatterGatherFlow = &cli.Command{
 
 		sinkConfig, err := stream.NewStreamSinkConfig(streamConfig)
 
-		producerSplitFunction := func(ctx context.Context, js jetstream.JetStream, future *flow.Future[*stream.Message], tracer trace.Tracer, logger *common.Logger) error {
-			producerSpanCtx, producerSpan := tracer.Start(ctx, fmt.Sprintf("distributor_search_sink.message.producer"))
-			var attrs []attribute.KeyValue
-			defer func() {
-				producerSpan.SetAttributes(attrs...)
-				producerSpan.End()
-			}()
-			original := future.Original()
-			search := proto.Search{}
-			err := search.UnmarshalVT(original.Payload())
-			if err != nil {
-				attrs = append(attrs, attribute.String("producer_function_test_attr", "test"))
-				return stream.SetLogError(producerSpanCtx, "map producer unmarshal payload failed", err, logger)
-			}
+		sinkHandlers := handlers.NewSinkHandlers[*stream.Message](sc.js, sc.tracer, sc.logger)
 
-			subject, err := original.Subject()
-			if err != nil {
-				return stream.SetLogError(producerSpanCtx, "map producer get subject failed", err, logger)
-			}
-			attrs = append(attrs, attribute.String("subject", subject))
-			uuid := xid.New().String()
-			// msg, err := stream.NewMessage(uuid, original.Payload())
-			//if err != nil {
-			//	return stream.SetLogError(producerSpanCtx, "map producer new message failed", err, logger)
-			//}
-			msg, err := original.Copy()
-			if err != nil {
-				return stream.SetLogError(producerSpanCtx, "map producer copy message failed", err, logger)
-			}
-			msg.SetUuid(uuid)
-			msg.SetSubject(subject)
-			msg.SetContext(producerSpanCtx)
-			natsMsgId := original.GetMessageMetadata(originalNatsMsgIdKey)
-			msgData, err := stream.NewNatsMessage(msg)
-			if err != nil {
-				return stream.SetLogError(producerSpanCtx, "map producer new nats message failed", err, logger)
-			}
-			//fmt.Printf("original DefaultNumDeliveredKey %+v\n", original.GetMessageMetadata(stream.DefaultNumDeliveredKey))
-			numDelivered := msg.GetMessageMetadata(stream.DefaultNumDeliveredKey)
-			debugFailed := msg.GetMessageMetadata(debugFailedKey)
-			if debugFailed == "true" && numDelivered == "1" {
-				fmt.Printf("PublishMsgAsync numDelivered: %+v\n", numDelivered)
-				fmt.Println("PublishMsgAsync msg debugFailedKey:", debugFailed)
-				return stream.SetLogError(producerSpanCtx, "test failed PublishMsgAsync", fmt.Errorf("test error"), logger)
-			}
-			ack, err := js.PublishMsgAsync(msgData, jetstream.WithMsgID(natsMsgId))
-			if err != nil {
-				return stream.SetLogError(producerSpanCtx, "map producer publish error", err, logger)
-			}
-
-			select {
-			case <-ack.Ok():
-				return nil
-			case err := <-ack.Err():
-				return stream.SetLogError(producerSpanCtx, "map producer ack message failed", err, logger)
-			case <-producerSpanCtx.Done():
-				return producerSpanCtx.Err()
-			}
-		}
-
-		completeHandler := func(ctx context.Context, js jetstream.JetStream, future *flow.Future[*stream.Message], tracer trace.Tracer, logger *common.Logger) error {
-			fmt.Printf("completeHandler\n")
-			return nil
-		}
-
-		sink, err := stream.NewStreamSinkProducer[*stream.Message](sc.ctx, "distributor_search_sink", sc.js, producerSplitFunction, completeHandler, sinkConfig, sc.tracer, sc.logger)
+		sink, err := stream.NewStreamSinkProducer[*stream.Message](sc.ctx,
+			"distributor_search_sink",
+			sc.js,
+			sinkHandlers.ProducerHandler,
+			sinkHandlers.CompletionHandler,
+			sinkConfig,
+			sc.tracer,
+			sc.logger,
+		)
 		if err != nil {
 			return err
 		}
 
 		splitMapTransformer := func(message *stream.Message) (*flow.Messages, error) {
-			splitMapSpanCtx, splitMapSpan := tracer.Start(message.Context(), fmt.Sprintf("distributor_search_map.message.split.transformer"))
+			splitMapSpanCtx, splitMapSpan := sc.tracer.Start(message.Context(), fmt.Sprintf("distributor_search_map.message.split.transformer"))
 			var attrs []attribute.KeyValue
 			defer func() {
 				splitMapSpan.SetAttributes(attrs...)
@@ -545,7 +493,7 @@ var serveScatterGatherFlow = &cli.Command{
 			//}
 
 			msgs := flow.NewMessages(message)
-			debugFailed := message.GetMessageMetadata(debugFailedKey)
+			debugFailed := message.GetMessageMetadata(handlers.DebugFailedKey)
 			for i, board := range search.Boards {
 				uuid := xid.New().String()
 				// msg, err := stream.NewMessage(uuid, data)
@@ -555,9 +503,9 @@ var serveScatterGatherFlow = &cli.Command{
 				}
 				// msg.SetMessageMetadata(debugFailedKey, "true")
 				if debugFailed == "true" && i == 2 {
-					msg.SetMessageMetadata(debugFailedKey, "true")
+					msg.SetMessageMetadata(handlers.DebugFailedKey, "true")
 				} else {
-					msg.SetMessageMetadata(debugFailedKey, "false")
+					msg.SetMessageMetadata(handlers.DebugFailedKey, "false")
 				}
 
 				subject := fmt.Sprintf(templateSearchWorkerSubject, board, search.Id)
@@ -568,7 +516,7 @@ var serveScatterGatherFlow = &cli.Command{
 				msg.SetMessageMetadata(originalSearchIdKey, strconv.FormatInt(int64(search.Id), 10))
 				msg.SetMessageMetadata(originalBoardKey, board)
 				natsMsgId := fmt.Sprintf("%s-%s-%s", message.Uuid(), strconv.Itoa(int(search.Id)), board)
-				msg.SetMessageMetadata(originalNatsMsgIdKey, natsMsgId)
+				msg.SetMessageMetadata(handlers.OriginalNatsMsgIdKey, natsMsgId)
 				msgs.Messages = append(msgs.Messages, msg)
 			}
 
@@ -582,7 +530,7 @@ var serveScatterGatherFlow = &cli.Command{
 
 		sc.logger.Ctx(sc.ctx).Info("start scatter gather flow...")
 
-		runGroup := common.NewRunGroup(10 * time.Second)
+		runGroup := common.NewRunGroup(true, 10*time.Second)
 
 		_ = runGroup.Add("StreamSource", func() error {
 			sc.logger.Ctx(sc.ctx).Sugar().Debugf("started stream source.")
@@ -632,23 +580,6 @@ var serveScatterGatherFlow = &cli.Command{
 			return nil
 		}, func(err error) {
 			sc.logger.Ctx(c.Context).Sugar().Debugf("stream flow interrupt")
-		})
-
-		_ = runGroup.Add("SystemInterrupt", func() error {
-			sc.logger.Ctx(sc.ctx).Sugar().Debugf("started system interrupt.")
-			term := make(chan os.Signal, 32)
-			signal.Notify(term, os.Interrupt, unix.SIGINT, unix.SIGQUIT, unix.SIGTERM)
-			select {
-			case <-term:
-			case <-sc.ctx.Done():
-			}
-			return nil
-		}, func(err error) {
-			sc.logger.Ctx(sc.ctx).Sugar().Debugf("system interrupted")
-			if err != nil && !(errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)) {
-				sc.logger.Ctx(sc.ctx).Error("system interrupt error:", zap.Error(err))
-			}
-			sc.cancel()
 		})
 
 		if err := runGroup.Run(sc.ctx); err != nil && !(errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)) {
@@ -767,7 +698,7 @@ func (cdc *CdcSource) Run() error {
 				msg.SetSubject(fmt.Sprintf("%s.%d", defaultSearchCDCSubject, id))
 				msg.SetContext(cdcSpanCtx)
 				if len(boards) >= 3 {
-					msg.SetMessageMetadata(debugFailedKey, "true")
+					msg.SetMessageMetadata(handlers.DebugFailedKey, "true")
 				}
 				msgData, err := stream.NewNatsMessage(msg)
 				if err != nil {

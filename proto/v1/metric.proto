@@ -1,0 +1,15 @@
+syntax = "proto3";
+
+
+package nats_jetstream_flow.metrics.v1;
+option go_package = "github.com/pnvasko/nats-jetstream-flow/proto";
+
+import "github.com/planetscale/vtprotobuf@v0.6.0/include/github.com/planetscale/vtprotobuf/vtproto/ext.proto";
+
+message CounterGaugeRecord {
+  option (vtproto.mempool) = true;
+  int64 counter  = 1;
+  int64 gauge  = 2;
+  int64 timestamp = 3;
+  map<string, string> metadata = 4;
+}
