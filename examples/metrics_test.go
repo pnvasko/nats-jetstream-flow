@@ -867,7 +867,7 @@ func setEnvironment(t testingBT, serviceName string) {
 		"SERVICE_NAME": serviceName,
 		"KEY":          "test.key",
 		"VERSION":      "0.1",
-		"DSN":          DSN, // Ensure DSN is defined in your test scope
+		"DSN":          os.Getenv("DSN"), // Ensure OTLP DSN is defined in your test scope
 	}
 	for k, v := range envs {
 		require.NoError(t, os.Setenv(k, v))
@@ -975,22 +975,3 @@ func workflowLabelFactory(params any) (string, error) {
 
 	return labelBuf.String(), nil
 }
-
-//func updateMetrics(ctx context.Context, name, bucketName, scope string, js jetstream.JetStream, tracer trace.Tracer, logger *common.Logger) {
-//	mc, err := NewMetricsCollection(ctx, name, bucketName, scope, js, tracer, logger)
-//	if err != nil {
-//		logger.Ctx(ctx).Sugar().Errorf("failed to create metrics collection: %v", err)
-//		return
-//	}
-//
-//	err = mc.AddMetric("user", NewMetricHandler(MapStore, func(params workflowLabelParams) (string, error) {
-//		return params.scope, nil
-//	}))
-//
-//	mc.store.Update(ctx, &coordination.LabelParams{}, &models.BaseMetricInput{})
-//	mc.mapStore.Update(ctx, &coordination.LabelParams{}, &models.MapMetricInput{})
-//
-//	_ = err
-//}
-
-const DSN = "https://Rw-RXLOqz1lnfkz63A7uNw@api.uptrace.dev?grpc=4317"
