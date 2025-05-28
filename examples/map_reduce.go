@@ -21,7 +21,7 @@ import (
 	"time"
 )
 
-func main() {
+func mapReduceMain() {
 	cls := &cli.App{
 		Name:  "map-reduce-flow",
 		Usage: "map-reduce-flow runs map reduce flow",
@@ -76,7 +76,7 @@ var serveMapReducesFlow = &cli.Command{
 		tracer := otel.Tracer("flow.map_reduce")
 		var attributes []attribute.KeyValue
 		attributes = append(attributes, attribute.Key("service").String("map_reduce_flow"))
-		ctx, main := tracer.Start(ctx, "main",
+		ctx, main := tracer.Start(ctx, "map_reduce_main",
 			trace.WithSpanKind(trace.SpanKindServer),
 			trace.WithAttributes(attributes...),
 		)

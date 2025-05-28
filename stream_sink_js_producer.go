@@ -19,7 +19,8 @@ const (
 	defaultProducerSinkPublishAsyncWait = 10 * time.Millisecond
 )
 
-type SinkConsumeFunction[T any] func(ctx context.Context, future *flow.Future[T]) error
+type SinkConsumeFunction[T any] func(context.Context, *flow.Future[T]) error
+type SinkCompleteFunction[T any] func(context.Context, *flow.Messages) error
 
 type StreamSinkConfig struct {
 	*StreamConfig
@@ -96,7 +97,7 @@ type StreamSinkProducer[T flow.Message] struct {
 	completePool *ants.MultiPoolWithFunc
 
 	consumeHandler  SinkConsumeFunction[T]
-	completeHandler SinkConsumeFunction[T]
+	completeHandler SinkCompleteFunction[T]
 	tracer          trace.Tracer
 	logger          *common.Logger
 }
@@ -105,7 +106,7 @@ func NewStreamSinkProducer[T flow.Message](ctx context.Context,
 	spanName string,
 	js jetstream.JetStream,
 	consumeHandler SinkConsumeFunction[T],
-	completeHandler SinkConsumeFunction[T],
+	completeHandler SinkCompleteFunction[T],
 	config *StreamSinkConfig,
 	tracer trace.Tracer,
 	logger *common.Logger,
@@ -150,7 +151,6 @@ func NewStreamSinkProducer[T flow.Message](ctx context.Context,
 		defer func() {
 			if x := recover(); x != nil {
 				future.SetError(fmt.Errorf("consume future with error: %v", x))
-				fmt.Println("error x", x)
 				ss.logger.Ctx(ss.ctx).Error("consume future error", zap.Error(fmt.Errorf("%v", x)))
 			}
 			msgSpan.End()
@@ -166,27 +166,23 @@ func NewStreamSinkProducer[T flow.Message](ctx context.Context,
 
 	ss.completePool, err = ants.NewMultiPoolWithFunc(ss.sendPoolSize, ss.sendPoolSizePerPool, func(im interface{}) {
 		defer ss.wg.Done()
-		future, ok := im.(*flow.Future[T])
+		messages, ok := im.(*flow.Messages)
 		if !ok {
-			ss.logger.Ctx(ss.ctx).Error("stream sink complete input not *Future type")
+			ss.logger.Ctx(ss.ctx).Sugar().Errorf("stream sink complete input not *Future type [%T]", im)
 			return
 		}
-		defer future.CloseInner()
-
-		msgSpanCtx, msgSpan := ss.tracer.Start(future.Context(), fmt.Sprintf("%s.message.complete", ss.spanName))
+		msgCompleteSpanCtx, msgCompleteSpan := ss.tracer.Start(ctx, fmt.Sprintf("%s.message.complete", ss.spanName))
 
 		defer func() {
+			fmt.Println("todo.completePool.defer")
 			if x := recover(); x != nil {
-				future.SetError(fmt.Errorf("complete future with error: %v", x))
-				fmt.Println("error x", x)
 				ss.logger.Ctx(ss.ctx).Error("complete future error", zap.Error(fmt.Errorf("%v", x)))
 			}
-			msgSpan.End()
+			msgCompleteSpan.End()
 		}()
-		// if err := ss.completeHandler(msgSpanCtx, js, future, ss.tracer, ss.logger); err != nil {
-		if err := ss.completeHandler(msgSpanCtx, future); err != nil {
-			future.SetError(err)
-			msgSpan.SetStatus(codes.Error, err.Error())
+
+		if err := ss.completeHandler(msgCompleteSpanCtx, messages); err != nil {
+			msgCompleteSpan.SetStatus(codes.Error, err.Error())
 			return
 		}
 	}, ants.RoundRobin)
@@ -281,11 +277,11 @@ LOOP:
 				// todo. select func for Ack or Nack by error
 				if len(errs) == 0 {
 					if ok := message.Ack(); !ok {
-						fmt.Println("StreamProducerSink.process.message:  failed to Ack message")
+						fmt.Println("TODO.StreamProducerSink.process.message:  failed to Ack message")
 					}
 				} else {
 					if ok := message.Nack(); !ok {
-						fmt.Println("StreamProducerSink.process.message: failed to Nack message")
+						fmt.Println("TODO.StreamProducerSink.process.message: failed to Nack message")
 					}
 				}
 			case *flow.Messages:
@@ -308,21 +304,20 @@ LOOP:
 				}
 
 				errs := futures.Await()
-				fmt.Println("futures complete OriginalMessage ACK")
 				// todo. select func for Ack or Nack by error
 				if len(errs) == 0 {
+					completeMessage := message.Copy()
 					if ok := message.OriginalMessage.Ack(); !ok {
-						fmt.Println("StreamProducerSink.process.messages: failed to Ack message")
+						ss.logger.Ctx(ctx).Sugar().Errorf("failed to Ack message")
 					}
-
 					ss.wg.Add(1)
-					if err := ss.completePool.Invoke(futures); err != nil {
+					if err := ss.completePool.Invoke(completeMessage); err != nil {
 						ss.logger.Ctx(ctx).Warn("stream sink failed to invoke processing function for input messages", zap.Error(err))
 						return
 					}
 				} else {
 					if ok := message.OriginalMessage.Nack(); !ok {
-						fmt.Println("StreamProducerSink.process.messages: failed to Nack message")
+						ss.logger.Ctx(ctx).Sugar().Errorf("failed to Nack message")
 					}
 				}
 			default:

@@ -8,6 +8,7 @@ import (
 	"github.com/nats-io/nats.go/jetstream"
 	stream "github.com/pnvasko/nats-jetstream-flow"
 	"github.com/pnvasko/nats-jetstream-flow/common"
+	"github.com/pnvasko/nats-jetstream-flow/coordination"
 	"github.com/pnvasko/nats-jetstream-flow/examples/handlers"
 	"github.com/pnvasko/nats-jetstream-flow/flow"
 	"github.com/pnvasko/nats-jetstream-flow/proto/v1"
@@ -28,7 +29,7 @@ import (
 )
 
 const (
-
+	totalSearch = 100
 	// Workflow Stream.
 	defaultWorkflowStreamName       = "workflow"
 	defaultWorkflowStreamSubjects   = "  distributor.>;  worker.>;collector.>"
@@ -52,6 +53,38 @@ const (
 
 var totalSearchesSend int32 = 0
 var totalSearchesPull int32 = 0
+
+type FlowCounter struct {
+}
+
+func NewFlowCounter() *FlowCounter {
+	return &FlowCounter{}
+}
+
+func (f FlowCounter) Get(ctx context.Context, params *coordination.LabelParams) (any, error) {
+	return nil, nil
+}
+
+func (f FlowCounter) FullUpdate(ctx context.Context, params *coordination.LabelParams, vs any) error {
+
+	return nil
+}
+
+func (f FlowCounter) Incr(ctx context.Context, params *coordination.LabelParams, i uint64) error {
+	return nil
+}
+
+func (f FlowCounter) Decr(ctx context.Context, params *coordination.LabelParams, i uint64) error {
+	return nil
+}
+
+func (f FlowCounter) Failed(ctx context.Context, params *coordination.LabelParams, i uint64) error {
+	return nil
+}
+
+func (f FlowCounter) Delete(ctx context.Context, params *coordination.LabelParams) error {
+	return nil
+}
 
 type serviceContext struct {
 	ctx          context.Context
@@ -208,11 +241,52 @@ func main() {
 				return err
 			}
 
+			//cg, err := coordination.NewCounterGaugeStore(sc.ctx, sc.js, sc.tracer, sc.logger)
+			//if err != nil {
+			//	return err
+			//}
+			//if err := cg.Reset(sc.ctx, handlers.LabelSearchNew); err != nil {
+			//	return err
+			//}
+			//if err := cg.Reset(sc.ctx, handlers.LabelSearchBoard); err != nil {
+			//	return err
+			//}
+
 			return nil
 		},
 		After: func(ctx *cli.Context) error {
 			fmt.Println("after stop service.")
-			fmt.Printf("total searches send/pull: %d/%d\n", atomic.LoadInt32(&totalSearchesSend), atomic.LoadInt32(&totalSearchesPull))
+			// fmt.Printf("total searches send/pull: %d/%d\n", atomic.LoadInt32(&totalSearchesSend), atomic.LoadInt32(&totalSearchesPull))
+			sc, err := initService(context.Background(), "workflow.map_reduce.after_test", "workflow_map_reduce_after", "after_main")
+			if err != nil {
+				return err
+			}
+			_ = sc.Shutdown()
+
+			//cg, err := coordination.NewCounterGaugeStore(sc.ctx, sc.js, sc.tracer, sc.logger)
+			//if err != nil {
+			//	return err
+			//}
+			//rawCounterSearchNew, err := cg.Read(sc.ctx, handlers.LabelSearchNew)
+			//if err != nil {
+			//	return err
+			//}
+			//counterSearchNew, ok := rawCounterSearchNew.(*coordination.CounterGauge)
+			//if !ok {
+			//	return fmt.Errorf("failed to cast counter record to coordination.CounterGauge %T", rawCounterSearchNew)
+			//}
+			//fmt.Printf("after counter search.new expected: %d, actual: %d [%d]\n", totalSearch, counterSearchNew.Counter, counterSearchNew.Gauge)
+			//
+			//rawCounterSearchBoard, err := cg.Read(sc.ctx, handlers.LabelSearchBoard)
+			//if err != nil {
+			//	return err
+			//}
+			//counterSearchBoard, ok := rawCounterSearchBoard.(*coordination.CounterGauge)
+			//if !ok {
+			//	return fmt.Errorf("failed to cast counter record to coordination.CounterGauge %T", rawCounterSearchBoard)
+			//}
+			//fmt.Printf("after counter search.board expected: %d, actual: %d [%d]\n", atomic.LoadInt32(&totalSearchesSend), counterSearchBoard.Counter, counterSearchBoard.Gauge)
+
 			return nil
 		},
 	}
@@ -244,7 +318,10 @@ var serveCdcFlow = &cli.Command{
 
 		sc.logger.Ctx(sc.ctx).Info("start emulate cdc flow...")
 
-		runGroup := common.NewRunGroup(true, 10*time.Second)
+		runGroup, err := common.NewRunGroup(common.WithStopTimeout(10 * time.Second))
+		if err != nil {
+			return err
+		}
 
 		_ = runGroup.Add("CdcEmitter", func() error {
 			sc.logger.Ctx(sc.ctx).Sugar().Debugf("started cdc emitter.")
@@ -317,7 +394,10 @@ var serveWorkerFlow = &cli.Command{
 
 		sc.logger.Ctx(sc.ctx).Info("start worker flow...")
 
-		runGroup := common.NewRunGroup(true, 10*time.Second)
+		runGroup, err := common.NewRunGroup(common.WithStopTimeout(10 * time.Second))
+		if err != nil {
+			return err
+		}
 
 		_ = runGroup.Add("WorkerSource", func() error {
 			sc.logger.Ctx(sc.ctx).Sugar().Debugf("started worker stream flow.")
@@ -454,8 +534,19 @@ var serveScatterGatherFlow = &cli.Command{
 		}
 
 		sinkConfig, err := stream.NewStreamSinkConfig(streamConfig)
+		if err != nil {
+			return err
+		}
 
-		sinkHandlers := handlers.NewSinkHandlers[*stream.Message](sc.js, sc.tracer, sc.logger)
+		//counter, err := coordination.NewCounterGaugeStore(sc.ctx, sc.js, sc.tracer, sc.logger)
+		//if err != nil {
+		//	return err
+		//}
+		counter := NewFlowCounter()
+		sinkHandlers, err := handlers.NewSinkHandlers[*stream.Message](sc.ctx, sc.js, counter, sc.tracer, sc.logger)
+		if err != nil {
+			return err
+		}
 
 		sink, err := stream.NewStreamSinkProducer[*stream.Message](sc.ctx,
 			"distributor_search_sink",
@@ -486,11 +577,6 @@ var serveScatterGatherFlow = &cli.Command{
 			if len(search.Boards) == 0 {
 				return nil, nil
 			}
-
-			//data, err := search.MarshalVT()
-			//if err != nil {
-			//	return nil, err
-			//}
 
 			msgs := flow.NewMessages(message)
 			debugFailed := message.GetMessageMetadata(handlers.DebugFailedKey)
@@ -530,7 +616,10 @@ var serveScatterGatherFlow = &cli.Command{
 
 		sc.logger.Ctx(sc.ctx).Info("start scatter gather flow...")
 
-		runGroup := common.NewRunGroup(true, 10*time.Second)
+		runGroup, err := common.NewRunGroup(common.WithStopTimeout(10 * time.Second))
+		if err != nil {
+			return err
+		}
 
 		_ = runGroup.Add("StreamSource", func() error {
 			sc.logger.Ctx(sc.ctx).Sugar().Debugf("started stream source.")
@@ -621,6 +710,11 @@ func NewCdcEmitter(ctx context.Context, js jetstream.JetStream, tracer trace.Tra
 func (cdc *CdcSource) Run() error {
 	ctxRun, runSpan := cdc.tracer.Start(cdc.ctx, "cdcSource.run")
 	defer runSpan.End()
+
+	//cg, err := coordination.NewCounterGaugeStore(cdc.ctx, cdc.js, cdc.tracer, cdc.logger)
+	//if err != nil {
+	//	return err
+	//}
 
 	allBoards := []string{"amazon", "ebay", "walmart", "shopify", "alibaba", "wish"}
 
@@ -714,9 +808,22 @@ func (cdc *CdcSource) Run() error {
 				// fmt.Printf("cdc source ticker search_id: %d; msg_id %s: boards %s\n", id, msgId, strings.Join(s.Boards, ","))
 				attrs = append(attrs, attribute.String("msg_id", msgId))
 				attrs = append(attrs, attribute.String("msg_board", strings.Join(s.Boards, ",")))
+				fmt.Printf("cdc source ticker search_id: %d; msg_id %s: len boards %d\n", id, msgId, len(s.Boards))
 				atomic.AddInt32(&totalSearchesSend, int32(len(s.Boards)))
+				//if err := cg.Update(cdcSpanCtx, handlers.LabelSearchNew, 1); err != nil {
+				//	cdc.logger.Ctx(ctxRun).Sugar().Errorf("cdc source failed incr search new counter: %d; msg_id %s: boards %s", id, msgId, strings.Join(s.Boards, ","))
+				//	//errCh <- stream.SetLogError(cdcSpanCtx, "increment counter failed", err, cdc.logger)
+				//	//return
+				//}
+				//
+				//if err := cg.Update(cdcSpanCtx, handlers.LabelSearchBoard, int64(len(s.Boards))); err != nil {
+				//	cdc.logger.Ctx(ctxRun).Sugar().Errorf("cdc source failed incr search board counter: %d; msg_id %s: boards %s", id, msgId, strings.Join(s.Boards, ","))
+				//	//errCh <- stream.SetLogError(cdcSpanCtx, "increment counter failed", err, cdc.logger)
+				//	//return
+				//}
+
 				id++
-				if id > 2 {
+				if id > totalSearch {
 					errCh <- nil
 				}
 				close(complete)
@@ -730,6 +837,7 @@ func (cdc *CdcSource) Run() error {
 				time.Sleep(5000 * time.Millisecond)
 				return err
 			case <-complete:
+
 				continue
 			}
 		}

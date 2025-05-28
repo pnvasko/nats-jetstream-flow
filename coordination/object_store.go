@@ -1,0 +1,512 @@
+package coordination
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"github.com/nats-io/nats.go/jetstream"
+	"github.com/pnvasko/nats-jetstream-flow/common"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
+	"sync"
+	"sync/atomic"
+	"time"
+)
+
+const (
+	defaultObjectStoreName         = "object_store"
+	defaultObjectStoreScope        = "object"
+	defaultObjectStoreBucketPrefix = "store"
+)
+
+type Object interface {
+	Label(params any) (string, error)
+	SpanName() string
+	Empty() ([]byte, error)
+	MarshalVT() ([]byte, error)
+	UnmarshalVT([]byte) error
+	Update(any) error
+}
+
+type LabelParams struct {
+	Label  string
+	Params any
+}
+type labelMutex struct {
+	mu       sync.Mutex
+	refCount int64
+	// Store time.Time as UnixNano for atomic operations
+	// lastUse atomic.Int64
+	// Consider adding a mechanism to clean up unused mutexes from the map, perhaps based on a least-recently-used (LRU) policy or a periodic sweep using the commented-out lastUse timestamp idea.
+}
+
+func (m *labelMutex) Lock() {
+	m.mu.Lock()
+}
+
+func (m *labelMutex) Unlock() {
+	m.mu.Unlock()
+}
+
+type ObjectStore[T Object, R any] struct {
+	*baseKvStore
+	ctx    context.Context
+	cancel context.CancelFunc
+	ctxMu  sync.RWMutex
+
+	mu sync.RWMutex // Protects RMW cycle within a single client instance
+
+	mutexLock   sync.Mutex
+	mutexObject map[string]*labelMutex
+
+	js jetstream.JetStream
+	kv jetstream.KeyValue
+
+	objectFactory func() T
+
+	spanNameUpdate string
+	spanNameRead   string
+	spanNameReset  string
+
+	tracer trace.Tracer
+	logger *common.Logger
+}
+
+func NewObjectStore[T Object, UpdateInput any](ctx context.Context, js jetstream.JetStream, factory func() T, tracer trace.Tracer, logger *common.Logger, opts ...StoreOption[*ObjectStore[T, UpdateInput]]) (*ObjectStore[T, UpdateInput], error) {
+	object := factory()
+	spanName := object.SpanName()
+	m := &ObjectStore[T, UpdateInput]{
+		baseKvStore: &baseKvStore{
+			scope:            defaultObjectStoreScope,
+			retryWait:        defaultRetryWait,
+			maxRetryAttempts: defaultMaxRetryAttempts,
+			cleanupTTL:       defaultCleanupTTL,
+		},
+		js:            js,
+		objectFactory: factory,
+		mutexObject:   make(map[string]*labelMutex),
+
+		tracer: tracer,
+		logger: logger,
+	}
+	m.ctx, m.cancel = context.WithCancel(ctx)
+
+	for _, opt := range opts {
+		if err := opt(m); err != nil {
+			return nil, err
+		}
+	}
+
+	if m.bucketName == "" {
+		m.bucketName = fmt.Sprintf("%s_%s", defaultObjectStoreBucketPrefix, m.scope)
+	}
+
+	keyValueConfig := jetstream.KeyValueConfig{
+		Bucket:      m.bucketName,
+		Description: fmt.Sprintf("Distributed objects for %s", m.scope),
+	}
+
+	if m.cleanupTTL >= 0 {
+		keyValueConfig.TTL = m.cleanupTTL
+	}
+
+	m.spanNameUpdate = fmt.Sprintf("object_store.%s.%s.update", m.scope, spanName)
+	m.spanNameRead = fmt.Sprintf("object_store.%s.%s.read", m.scope, spanName)
+	m.spanNameReset = fmt.Sprintf("object_store.%s.%s.reset", m.scope, spanName)
+
+	kv, err := js.CreateKeyValue(m.ctx, keyValueConfig)
+	if err == nil {
+		m.kv = kv
+		return m, nil
+	}
+
+	if isJSAlreadyExistsError(err) {
+		kv, err = js.KeyValue(m.ctx, m.bucketName)
+		if err != nil {
+			return nil, fmt.Errorf("failed to bind to existing KV store '%s': %w", m.bucketName, err)
+		}
+		m.kv = kv
+	} else {
+		return nil, fmt.Errorf("failed to create/get KV store '%s': %w", m.bucketName, err)
+	}
+	return m, nil
+}
+
+func (m *ObjectStore[T, R]) JS() jetstream.JetStream {
+	return m.js
+}
+
+func (m *ObjectStore[T, R]) KV() jetstream.KeyValue {
+	return m.kv
+}
+
+func (m *ObjectStore[T, R]) Update(ctx context.Context, params *LabelParams, values R) error {
+	label, err := m.resolveLabel(params) // Use the new resolver
+	if err != nil {
+		return fmt.Errorf("failed to resolve label: %w", err) // Add context to the error
+	}
+
+	ctx, updateSpan := m.tracer.Start(ctx, m.spanNameUpdate,
+		trace.WithAttributes(attribute.String("label", label)),
+		trace.WithAttributes(attribute.Key("service").String(defaultObjectStoreName)),
+	)
+	defer updateSpan.End()
+
+	lm := m.getLabelMutex(label) // This now returns *labelMutex
+	lm.mu.Lock()
+	defer func(lm *labelMutex) {
+		lm.mu.Unlock()
+		m.releaseLabelMutex(label)
+	}(lm)
+
+	var lastErr error
+	for i := 0; i < m.maxRetryAttempts; i++ {
+		newVal, revision, err := m.getNewValue(ctx, label, values)
+		if err != nil {
+			return err
+		}
+		var updateErr error
+		if revision == 0 {
+			_, updateErr = m.kv.Create(ctx, label, newVal)
+		} else {
+			_, updateErr = m.kv.Update(ctx, label, newVal, revision)
+		}
+		lastErr = updateErr
+
+		if updateErr == nil {
+			return nil
+		}
+		if isJSWrongLastSequence(updateErr) {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-m.ctx.Done():
+				return m.ctx.Err()
+			case <-time.After(m.retryWait):
+				continue
+			}
+		}
+		return fmt.Errorf("objects incr failed on attempt %d: %w", i+1, updateErr)
+	}
+	return fmt.Errorf("objects incr failed after %d attempts due to conflicts: last error: %w", m.maxRetryAttempts, lastErr)
+}
+
+func (m *ObjectStore[T, R]) Read(ctx context.Context, params *LabelParams) (T, error) {
+	var zero T
+	label, err := m.resolveLabel(params) // Use the new resolver
+	if err != nil {
+		return zero, fmt.Errorf("failed to resolve label: %w", err) // Add context to the error
+	}
+
+	ctx, readSpan := m.tracer.Start(ctx, m.spanNameRead,
+		trace.WithAttributes(attribute.String("label", label)),
+		trace.WithAttributes(attribute.Key("service").String(defaultObjectStoreName)),
+	)
+	defer readSpan.End()
+
+	lm := m.getLabelMutex(label)
+	lm.mu.Lock()
+	defer func(lm *labelMutex) {
+		lm.mu.Unlock()
+		m.releaseLabelMutex(label)
+	}(lm)
+
+	entry, err := m.kv.Get(ctx, label)
+	if err != nil {
+		return zero, err
+	}
+
+	var object T = m.objectFactory()
+	err = object.UnmarshalVT(entry.Value())
+
+	if err != nil {
+		return zero, fmt.Errorf("failed to unmarshal object state: %w", err)
+	}
+
+	return object, nil
+}
+
+func (m *ObjectStore[T, R]) Reset(ctx context.Context, params *LabelParams) error {
+	label, err := m.resolveLabel(params) // Use the new resolver
+	if err != nil {
+		return fmt.Errorf("failed to resolve label: %w", err) // Add context to the error
+	}
+
+	ctx, resetSpan := m.tracer.Start(ctx, m.spanNameReset,
+		trace.WithAttributes(attribute.String("label", label)),
+		trace.WithAttributes(attribute.Key("service").String(defaultObjectStoreName)),
+	)
+	defer resetSpan.End()
+
+	lm := m.getLabelMutex(label)
+	lm.mu.Lock()
+	defer func(lm *labelMutex) {
+		lm.mu.Unlock()
+		m.releaseLabelMutex(label)
+	}(lm)
+
+	var object T = m.objectFactory()
+	emptyMetricVal, err := object.Empty()
+	if err != nil {
+		return fmt.Errorf("failed to create empty object: %w", err)
+	}
+	var lastErr error
+	for i := 0; i < m.maxRetryAttempts; i++ {
+		entry, err := m.kv.Get(ctx, label)
+		var revision uint64
+
+		if err != nil {
+			if errors.Is(err, jetstream.ErrKeyNotFound) || errors.Is(err, jetstream.ErrKeyDeleted) {
+				revision = 0
+			} else if errors.Is(err, jetstream.ErrBucketNotFound) {
+				return fmt.Errorf("bucket object store '%s' not found: %w", m.bucketName, err)
+			} else {
+				return fmt.Errorf("failed to get object store state: %w", err)
+			}
+		} else {
+			revision = entry.Revision()
+		}
+
+		var updateErr error
+		if revision == 0 {
+			_, updateErr = m.kv.Create(ctx, label, emptyMetricVal)
+		} else {
+			_, updateErr = m.kv.Update(ctx, label, emptyMetricVal, revision)
+		}
+		lastErr = updateErr
+		if updateErr == nil {
+			return nil
+		}
+		if isJSWrongLastSequence(updateErr) {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-m.ctx.Done():
+				return m.ctx.Err()
+			case <-time.After(m.retryWait):
+				continue
+			}
+		}
+		return fmt.Errorf("object reset failed on attempt %d: %w", i+1, updateErr)
+	}
+
+	return fmt.Errorf("object reset failed after %d attempts due to conflicts: last error: %w", m.maxRetryAttempts, lastErr)
+}
+
+func (m *ObjectStore[T, R]) Watch(ctx context.Context, params *LabelParams, fn func(T)) error {
+	label, err := m.resolveLabel(params) // Use the new resolver
+	if err != nil {
+		return fmt.Errorf("failed to resolve label: %w", err) // Add context to the error
+	}
+	var watcher jetstream.KeyWatcher
+	defer func() {
+		if watcher != nil {
+			if err := watcher.Stop(); err != nil { // Best effort stop
+				m.logger.Ctx(context.Background()).Sugar().Errorf("failed to stop watcher [%s]: %s", label, err.Error())
+			}
+			watcher = nil
+		}
+	}()
+	//fmt.Println("Watch.Get")
+	//for {
+	//	entry, err := m.kv.Get(ctx, label)
+	//	if err != nil {
+	//		if errors.Is(err, jetstream.ErrKeyNotFound) || errors.Is(err, jetstream.ErrKeyDeleted) {
+	//			time.Sleep(m.retryWait)
+	//			continue
+	//		}
+	//		return fmt.Errorf("failed to get state for '%s': %s", label, err.Error())
+	//	}
+	//	var object T = m.objectFactory(m.name)
+	//	err = object.UnmarshalVT(entry.Value())
+	//	if err != nil {
+	//		return fmt.Errorf("failed to unmarshal objects state: %s", err.Error())
+	//	}
+	//	fn(object)
+	//	break
+	//}
+	//fmt.Println("Watch.watching")
+	for {
+		if watcher == nil {
+			// watcher, err = m.kv.Watch(ctx, label, jetstream.UpdatesOnly())
+			watcher, err = m.kv.Watch(ctx, label)
+			if err != nil {
+				select {
+				case <-m.Context().Done():
+					return m.ctx.Err()
+				case <-ctx.Done():
+					return ctx.Err()
+				default:
+				}
+				if errors.Is(err, jetstream.ErrBucketNotFound) || errors.Is(err, jetstream.ErrKeyNotFound) {
+					time.Sleep(m.retryWait)
+					continue
+				}
+				return fmt.Errorf("failed to watch state for '%s': %s", label, err.Error())
+			}
+		}
+		select {
+		case entry, ok := <-watcher.Updates():
+			if !ok {
+				m.logger.Ctx(ctx).Sugar().Warnf("watcher [%s] updates channel closed unexpectedly.", label)
+				time.Sleep(m.retryWait)
+				watcher = nil
+				continue
+			}
+			if entry != nil {
+				m.logger.Ctx(ctx).Sugar().Debugf("watcher [%s] received update: op=%s, looping to retry wait.", label, entry.Operation())
+				var object T = m.objectFactory()
+				err = object.UnmarshalVT(entry.Value())
+				if err != nil {
+					m.logger.Ctx(ctx).Sugar().Errorf("failed to unmarshal objects state: %s", err.Error())
+				}
+				fn(object)
+			}
+		case <-m.Context().Done():
+			return m.Context().Err()
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+}
+
+func (m *ObjectStore[T, R]) Delete(ctx context.Context, params *LabelParams) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	label, err := m.resolveLabel(params) // Use the new resolver
+	if err != nil {
+		return fmt.Errorf("failed to resolve label: %w", err) // Add context to the error
+	}
+	return m.kv.Delete(ctx, label)
+}
+
+func (m *ObjectStore[T, R]) DeleteBucket(ctx context.Context) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	err := m.js.DeleteKeyValue(ctx, m.bucketName)
+	if err != nil {
+		return fmt.Errorf("failed to destroy objects bucket '%s': %w", m.bucketName, err)
+	}
+	return nil
+}
+
+func (m *ObjectStore[T, R]) Scope() string {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	return m.scope
+}
+
+func (m *ObjectStore[T, R]) Bucket() string {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	return m.bucketName
+}
+
+func (m *ObjectStore[T, R]) Context() context.Context {
+	m.ctxMu.RLock()
+	defer m.ctxMu.RUnlock()
+	return m.ctx
+}
+
+func (m *ObjectStore[T, R]) Close() {
+	m.cancel()
+}
+
+func (m *ObjectStore[T, R]) getLabelMutex(label string) *labelMutex {
+	m.mutexLock.Lock()
+	defer m.mutexLock.Unlock()
+
+	lm, ok := m.mutexObject[label]
+	if !ok {
+		lm = &labelMutex{}
+		m.mutexObject[label] = lm
+	}
+	atomic.AddInt64(&lm.refCount, 1)
+	return lm
+}
+
+func (m *ObjectStore[T, R]) releaseLabelMutex(label string) {
+	m.mutexLock.Lock()
+	defer m.mutexLock.Unlock()
+
+	if lm, ok := m.mutexObject[label]; ok {
+		if atomic.AddInt64(&lm.refCount, -1) == 0 {
+			delete(m.mutexObject, label)
+		}
+	}
+}
+
+func (m *ObjectStore[T, R]) getNewValue(ctx context.Context, label string, values R) ([]byte, uint64, error) {
+	var entryValue []byte
+	var revision uint64
+	entry, err := m.kv.Get(ctx, label)
+	if err != nil && !errors.Is(err, jetstream.ErrKeyNotFound) {
+		if errors.Is(err, jetstream.ErrKeyDeleted) {
+			m.logger.Ctx(ctx).Sugar().Warnf("key [%s] deleted: %s", label, err.Error())
+		}
+
+		if errors.Is(err, jetstream.ErrKeyNotFound) {
+			var emptyMetric T = m.objectFactory()
+			emptyRecord, emptyRecordError := emptyMetric.Empty()
+			if emptyRecordError != nil {
+				return nil, 0, fmt.Errorf("failed to create empty record: %w", emptyRecordError)
+			}
+			return emptyRecord, 0, nil
+		}
+		if errors.Is(err, jetstream.ErrBucketNotFound) {
+			return nil, 0, fmt.Errorf("objects bucket '%s' not found: %w", m.bucketName, err)
+		}
+	} else if errors.Is(err, jetstream.ErrKeyNotFound) {
+		var emptyRecordError error
+		var emptyMetric T = m.objectFactory()
+		revision = uint64(0)
+		entryValue, emptyRecordError = emptyMetric.Empty()
+		if emptyRecordError != nil {
+			return nil, 0, fmt.Errorf("failed to create empty record: %w", emptyRecordError)
+		}
+	} else {
+		entryValue = entry.Value()
+		revision = entry.Revision()
+	}
+
+	var object T = m.objectFactory()
+	err = object.UnmarshalVT(entryValue)
+	if err != nil {
+		return nil, 0, fmt.Errorf("failed to unmarshal objects state: %w", err)
+	}
+
+	if err := object.Update(values); err != nil {
+		return nil, 0, fmt.Errorf("failed to update objects state: %w", err)
+	}
+	newVal, err := object.MarshalVT()
+	if err != nil {
+		return nil, 0, fmt.Errorf("failed to marshal objects state: %w", err)
+	}
+
+	return newVal, revision, nil
+}
+
+func (m *ObjectStore[T, R]) resolveLabel(params *LabelParams) (string, error) {
+	if params == nil {
+		return "", fmt.Errorf("label params cannot be nil")
+	}
+
+	if params.Label != "" {
+		return params.Label, nil // Direct label takes precedence
+	}
+
+	obj := m.objectFactory()
+	labelFromParams, err := obj.Label(params.Params)
+	if err != nil {
+		return "", fmt.Errorf("failed to derive label: %w", err)
+	}
+
+	if labelFromParams == "" {
+		return "", fmt.Errorf("derived label cannot be empty")
+	}
+
+	return labelFromParams, nil
+}

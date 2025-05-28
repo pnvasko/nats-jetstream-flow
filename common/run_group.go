@@ -17,6 +17,22 @@ type actor struct {
 	interrupt func(error)
 }
 
+type RunGroupOption func(*RunGroup) error
+
+func WithSystemInterrupt(ok bool) RunGroupOption {
+	return func(rg *RunGroup) error {
+		rg.systemInterrupt = ok
+		return nil
+	}
+}
+
+func WithStopTimeout(td time.Duration) RunGroupOption {
+	return func(rg *RunGroup) error {
+		rg.stopTimeout = td
+		return nil
+	}
+}
+
 type RunGroup struct {
 	ctx             context.Context
 	cancel          context.CancelFunc
@@ -27,11 +43,23 @@ type RunGroup struct {
 	started         bool
 }
 
-func NewRunGroup(systemInterrupt bool, stopTimeout time.Duration) *RunGroup {
-	return &RunGroup{
-		systemInterrupt: systemInterrupt,
-		stopTimeout:     stopTimeout,
+const (
+	defaultSystemInterrupt = true
+	defaultStopTimeout     = 10 * time.Second
+)
+
+func NewRunGroup(opts ...RunGroupOption) (*RunGroup, error) {
+	rg := &RunGroup{
+		systemInterrupt: defaultSystemInterrupt,
+		stopTimeout:     defaultStopTimeout,
 	}
+
+	for _, opt := range opts {
+		if err := opt(rg); err != nil {
+			return nil, err
+		}
+	}
+	return rg, nil
 }
 
 func (g *RunGroup) Add(name string, execute func() error, interrupt func(error)) error {
@@ -88,7 +116,9 @@ func (g *RunGroup) Run(baseCtx context.Context) error {
 	case err = <-executeErrors:
 	case <-executeComplete:
 	case <-ctx.Done():
-		err = ctx.Err()
+		if !errors.Is(ctx.Err(), context.Canceled) {
+			err = ctx.Err()
+		}
 	case <-baseCtx.Done():
 		err = baseCtx.Err()
 	}

@@ -6,10 +6,40 @@ option go_package = "github.com/pnvasko/nats-jetstream-flow/proto";
 
 import "github.com/planetscale/vtprotobuf@v0.6.0/include/github.com/planetscale/vtprotobuf/vtproto/ext.proto";
 
-message CounterGaugeRecord {
+message BaseMetric  {
   option (vtproto.mempool) = true;
-  int64 counter  = 1;
-  int64 gauge  = 2;
-  int64 timestamp = 3;
-  map<string, string> metadata = 4;
+  uint64 processed = 1; // counter
+  int64  in_flight = 2; // gauge
+  uint64 failed = 3; // counter
 }
+
+message MapMetric {
+  BaseMetric overall = 1;
+  map<uint64, BaseMetric> boards = 2;
+}
+
+//message ClientMetric {
+//  option (vtproto.mempool) = true;
+//  BaseMetric base = 1;
+//  map<uint64, BaseMetric> boards = 2;
+//}
+//
+//message UserMetric {
+//  option (vtproto.mempool) = true;
+//  BaseMetric base = 1;
+//  map<uint64, BaseMetric> boards = 2;
+//}
+//
+//message CounterGaugeRecord {
+//  option (vtproto.mempool) = true;
+//  int64 counter  = 1;
+//  int64 gauge  = 2;
+//  int64 timestamp = 3;
+//  map<string, string> metadata = 4;
+//}
+//
+//
+//message CoordinationCounterRecord {
+//  option (vtproto.mempool) = true;
+//
+//}

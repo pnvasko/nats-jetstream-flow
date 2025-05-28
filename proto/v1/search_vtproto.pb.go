@@ -56,8 +56,18 @@ func (m *Search) MarshalToSizedBufferVT(dAtA []byte) (int, error) {
 			copy(dAtA[i:], m.Boards[iNdEx])
 			i = protohelpers.EncodeVarint(dAtA, i, uint64(len(m.Boards[iNdEx])))
 			i--
-			dAtA[i] = 0x2a
+			dAtA[i] = 0x3a
 		}
+	}
+	if m.UserId != 0 {
+		i = protohelpers.EncodeVarint(dAtA, i, uint64(m.UserId))
+		i--
+		dAtA[i] = 0x30
+	}
+	if m.CompanyId != 0 {
+		i = protohelpers.EncodeVarint(dAtA, i, uint64(m.CompanyId))
+		i--
+		dAtA[i] = 0x28
 	}
 	if m.ClientId != 0 {
 		i = protohelpers.EncodeVarint(dAtA, i, uint64(m.ClientId))
@@ -111,6 +121,12 @@ func (m *Search) SizeVT() (n int) {
 	}
 	if m.ClientId != 0 {
 		n += 1 + protohelpers.SizeOfVarint(uint64(m.ClientId))
+	}
+	if m.CompanyId != 0 {
+		n += 1 + protohelpers.SizeOfVarint(uint64(m.CompanyId))
+	}
+	if m.UserId != 0 {
+		n += 1 + protohelpers.SizeOfVarint(uint64(m.UserId))
 	}
 	if len(m.Boards) > 0 {
 		for _, s := range m.Boards {
@@ -256,12 +272,50 @@ func (m *Search) UnmarshalVT(dAtA []byte) error {
 				}
 				b := dAtA[iNdEx]
 				iNdEx++
-				m.ClientId |= int32(b&0x7F) << shift
+				m.ClientId |= int64(b&0x7F) << shift
 				if b < 0x80 {
 					break
 				}
 			}
 		case 5:
+			if wireType != 0 {
+				return fmt.Errorf("proto: wrong wireType = %d for field CompanyId", wireType)
+			}
+			m.CompanyId = 0
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return protohelpers.ErrIntOverflow
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := dAtA[iNdEx]
+				iNdEx++
+				m.CompanyId |= int64(b&0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+		case 6:
+			if wireType != 0 {
+				return fmt.Errorf("proto: wrong wireType = %d for field UserId", wireType)
+			}
+			m.UserId = 0
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return protohelpers.ErrIntOverflow
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := dAtA[iNdEx]
+				iNdEx++
+				m.UserId |= int64(b&0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+		case 7:
 			if wireType != 2 {
 				return fmt.Errorf("proto: wrong wireType = %d for field Boards", wireType)
 			}
