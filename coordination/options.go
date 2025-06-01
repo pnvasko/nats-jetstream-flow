@@ -2,7 +2,6 @@ package coordination
 
 import (
 	"fmt"
-	"reflect"
 	"time"
 )
 
@@ -16,62 +15,45 @@ type storeOptionScopable interface {
 }
 type StoreOption[T any] func(T) error
 
-func WithScope[T any](scope string) StoreOption[T] {
+func WithScope[T interface{ setScope(string) }](scope string) StoreOption[T] {
 	return func(s T) error {
-		if settable, ok := any(s).(interface{ setScope(string) }); ok {
-			settable.setScope(scope)
-			return nil
-		}
-		return fmt.Errorf("type %T does not support scope setting", s)
+		s.setScope(scope)
+		return nil
 	}
 }
 
-func WithBucketPrefix[T any](prefix string) StoreOption[T] {
+func WithBucketPrefix[T interface{ setBucketPrefix(string) }](prefix string) StoreOption[T] {
 	return func(s T) error {
-		if settable, ok := any(s).(interface{ setBucketPrefix(string) }); ok {
-			settable.setBucketPrefix(prefix)
-			return nil
-		}
-		return fmt.Errorf("type %T does not support bucketPrefix setting", s)
+		s.setBucketPrefix(prefix)
+		return nil
 	}
 }
 
-func WithBucketName[T any](bucketName string) StoreOption[T] {
+func WithBucketName[T interface{ setBucketName(string) }](bucketName string) StoreOption[T] {
 	return func(s T) error {
-		if settable, ok := any(s).(interface{ setBucketName(string) }); ok {
-			settable.setBucketName(bucketName)
-			return nil
-		}
-		return fmt.Errorf("type %T does not support bucketName setting", s)
+		s.setBucketName(bucketName)
+		return nil
 	}
 }
 
-func WithRetryWait[T any](ttl time.Duration) StoreOption[T] {
+func WithRetryWait[T interface{ setRetryWait(time.Duration) }](ttl time.Duration) StoreOption[T] {
 	return func(s T) error {
-		if settable, ok := any(s).(interface{ setRetryWait(time.Duration) }); ok {
-			settable.setRetryWait(ttl)
-			return nil
-		}
-		return fmt.Errorf("type %T does not support cleanupTTL setting", s)
-	}
-}
-func WithCleanupTTL[T any](ttl time.Duration) StoreOption[T] {
-	return func(s T) error {
-		if settable, ok := any(s).(interface{ setCleanupTTL(time.Duration) }); ok {
-			settable.setCleanupTTL(ttl)
-			return nil
-		}
-		return fmt.Errorf("type %T does not support cleanupTTL setting", s)
+		s.setRetryWait(ttl)
+		return nil
 	}
 }
 
-func WithMaxRetryAttempts[T any](n int) StoreOption[T] {
+func WithCleanupTTL[T interface{ setCleanupTTL(time.Duration) }](ttl time.Duration) StoreOption[T] {
 	return func(s T) error {
-		if settable, ok := any(s).(interface{ setMaxRetryAttempts(int) }); ok {
-			settable.setMaxRetryAttempts(n)
-			return nil
-		}
-		return fmt.Errorf("type %T does not support cleanupTTL setting", s)
+		s.setCleanupTTL(ttl)
+		return nil
+	}
+}
+
+func WithMaxRetryAttempts[T interface{ setMaxRetryAttempts(int) }](n int) StoreOption[T] {
+	return func(s T) error {
+		s.setMaxRetryAttempts(n)
+		return nil
 	}
 }
 
@@ -87,19 +69,29 @@ func SetValue[T ~*U, U any, R any](setter func(T) *R, value R) StoreOption[T] {
 	}
 }
 
-func withScopeReflectV0[T any](scope string) StoreOption[T] {
-	return func(s T) error {
-		v := reflect.ValueOf(s)
-		if v.Kind() != reflect.Ptr {
-			return fmt.Errorf("must be a pointer")
-		}
+//func WithScope[T interface{ setScope(string) }](scope string) StoreOption[T] {
+//	return func(s T) error {
+//		if settable, ok := any(s).(interface{ setScope(string) }); ok {
+//			settable.setScope(scope)
+//			return nil
+//		}
+//		return fmt.Errorf("type %T does not support scope setting", s)
+//	}
+//}
 
-		field := v.Elem().FieldByName("scope")
-		if !field.IsValid() || field.Kind() != reflect.String {
-			return fmt.Errorf("type %T has no string scope field", s)
-		}
-
-		field.SetString(scope)
-		return nil
-	}
-}
+//func withScopeReflectV0[T any](scope string) StoreOption[T] {
+//	return func(s T) error {
+//		v := reflect.ValueOf(s)
+//		if v.Kind() != reflect.Ptr {
+//			return fmt.Errorf("must be a pointer")
+//		}
+//
+//		field := v.Elem().FieldByName("scope")
+//		if !field.IsValid() || field.Kind() != reflect.String {
+//			return fmt.Errorf("type %T has no string scope field", s)
+//		}
+//
+//		field.SetString(scope)
+//		return nil
+//	}
+//}

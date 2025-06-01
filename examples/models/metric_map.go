@@ -10,6 +10,9 @@ import (
 	"go.opentelemetry.io/otel/trace"
 )
 
+type MapMetricStoreObject = *coordination.ObjectStore[*MapMetric, *MapMetricInput]
+type MapMetricStoreOption []coordination.StoreOption[MapMetricStoreObject]
+
 type MapMetricStore struct {
 	*coordination.ObjectStore[*MapMetric, *MapMetricInput]
 }
@@ -21,12 +24,11 @@ func NewMapMetricFactory(name string, labelFactory func(any) (string, error)) fu
 	}
 }
 
-type MapMetricStoreOption []coordination.StoreOption[*coordination.ObjectStore[*MapMetric, *MapMetricInput]]
-
-func NewMapMetricStoreOption(bucketName, scope string) MapMetricStoreOption {
-	var storeOpts []coordination.StoreOption[*coordination.ObjectStore[*MapMetric, *MapMetricInput]]
-	storeOpts = append(storeOpts, coordination.WithBucketName[*coordination.ObjectStore[*MapMetric, *MapMetricInput]](bucketName))
-	storeOpts = append(storeOpts, coordination.WithScope[*coordination.ObjectStore[*MapMetric, *MapMetricInput]](scope))
+func NewMapMetricStoreOption(bucketName, scope string, opts ...coordination.StoreOption[MapMetricStoreObject]) MapMetricStoreOption {
+	var storeOpts []coordination.StoreOption[MapMetricStoreObject]
+	storeOpts = append(storeOpts, coordination.WithBucketName[MapMetricStoreObject](bucketName))
+	storeOpts = append(storeOpts, coordination.WithScope[MapMetricStoreObject](scope))
+	storeOpts = append(storeOpts, opts...)
 	return storeOpts
 }
 

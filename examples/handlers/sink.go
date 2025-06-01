@@ -6,7 +6,6 @@ import (
 	"github.com/nats-io/nats.go/jetstream"
 	stream "github.com/pnvasko/nats-jetstream-flow"
 	"github.com/pnvasko/nats-jetstream-flow/common"
-	"github.com/pnvasko/nats-jetstream-flow/coordination"
 	"github.com/pnvasko/nats-jetstream-flow/flow"
 	"github.com/pnvasko/nats-jetstream-flow/proto/v1"
 	"github.com/rs/xid"
@@ -15,20 +14,22 @@ import (
 )
 
 type SinkHandlers[T any] struct {
-	ctx     context.Context
-	js      jetstream.JetStream
-	counter coordination.Counter
-	tracer  trace.Tracer
-	logger  *common.Logger
+	ctx context.Context
+	js  jetstream.JetStream
+
+	mc *MetricsCollector
+
+	tracer trace.Tracer
+	logger *common.Logger
 }
 
-func NewSinkHandlers[T any](ctx context.Context, js jetstream.JetStream, counter coordination.Counter, tracer trace.Tracer, logger *common.Logger) (*SinkHandlers[T], error) {
+func NewSinkHandlers[T any](ctx context.Context, js jetstream.JetStream, mc *MetricsCollector, tracer trace.Tracer, logger *common.Logger) (*SinkHandlers[T], error) {
 	sh := &SinkHandlers[T]{
-		ctx:     ctx,
-		js:      js,
-		counter: counter,
-		tracer:  tracer,
-		logger:  logger,
+		ctx:    ctx,
+		js:     js,
+		mc:     mc,
+		tracer: tracer,
+		logger: logger,
 	}
 
 	return sh, nil
@@ -99,9 +100,16 @@ func (sh *SinkHandlers[T]) ProducerHandler(ctx context.Context, future *flow.Fut
 }
 
 func (sh *SinkHandlers[T]) CompletionHandler(ctx context.Context, messages *flow.Messages) error {
-	if err := sh.counter.Decr(ctx, &coordination.LabelParams{Label: LabelSearchNew}, 1); err != nil {
-		sh.logger.Ctx(ctx).Sugar().Errorf("failed to increment counter: %s", err.Error())
-		return err
+	data := messages.OriginalMessage.Data()
+	switch data.(type) {
+	case *proto.Search:
+		search := data.(*proto.Search)
+		fmt.Printf("SinkHandlers.CompletionHandler data: %d, %d; %v\n", search.Id, search.UserId, search.Boards)
+		if err := sh.mc.ScatterGatherSearchMetrics(ctx, search); err != nil {
+			return err
+		}
+	default:
+		sh.logger.Ctx(ctx).Sugar().Errorf("completion sink handler not support type %T", data)
 	}
 
 	return nil

@@ -2,15 +2,19 @@ package handlers
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"github.com/nats-io/nats.go/jetstream"
 	"github.com/pnvasko/nats-jetstream-flow/common"
 	"github.com/pnvasko/nats-jetstream-flow/coordination"
 	"github.com/pnvasko/nats-jetstream-flow/examples/models"
 	"github.com/pnvasko/nats-jetstream-flow/proto/v1"
+	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
+	"strconv"
 	"strings"
 	"sync"
+	"time"
 )
 
 type MetricsCollectionStoreType int
@@ -217,30 +221,136 @@ func (mr *MetricRecord) SetMapMetricBoardInput(id uint64, input *models.BaseMetr
 //			}
 //			mr.Data = &data
 
-type MetricsCollection struct {
+type BaseMetricsObjectStore = *coordination.ObjectStore[*models.BaseMetric, *models.BaseMetricInput]
+type MapMetricsObjectStore = *coordination.ObjectStore[*models.MapMetric, *models.MapMetricInput]
+
+type MetricsCollectorOption func(*MetricsCollector) error
+
+func WithScope(name string) MetricsCollectorOption {
+	return func(mc *MetricsCollector) error {
+		mc.scope = name
+		return nil
+	}
+}
+func WithBucketName(bucketName string) MetricsCollectorOption {
+	return func(mc *MetricsCollector) error {
+		mc.bucketName = &bucketName
+		return nil
+	}
+}
+
+func WithBucketPrefix(bucketPrefix string) MetricsCollectorOption {
+	return func(mc *MetricsCollector) error {
+		mc.bucketPrefix = &bucketPrefix
+		return nil
+	}
+}
+
+func WithCleanupTTL(ttl time.Duration) MetricsCollectorOption {
+	return func(mc *MetricsCollector) error {
+		mc.cleanupTTL = &ttl
+		return nil
+	}
+}
+
+func WithMaxRetryAttempts(n int) MetricsCollectorOption {
+	return func(mc *MetricsCollector) error {
+		mc.maxRetryAttempts = &n
+		return nil
+	}
+}
+
+func WithRetryWait(retryWait time.Duration) MetricsCollectorOption {
+	return func(mc *MetricsCollector) error {
+		mc.retryWait = &retryWait
+		return nil
+	}
+}
+
+type MetricsCollector struct {
 	mu        sync.Mutex
 	closeOnce sync.Once
 
+	scope    string
 	store    *models.BaseMetricStore
 	mapStore *models.MapMetricStore
 
 	scopeLabelHandler func(*strings.Builder, WorkflowLabelParams) error
 	metricHandlers    map[string]*MetricHandler
+
+	cleanupTTL       *time.Duration
+	bucketPrefix     *string
+	bucketName       *string
+	retryWait        *time.Duration
+	maxRetryAttempts *int
+
+	tracer trace.Tracer
+	logger *common.Logger
 }
 
-func NewMetricsCollection(ctx context.Context, name, bucketName, scope string, handler func(*strings.Builder, WorkflowLabelParams) error, js jetstream.JetStream, tracer trace.Tracer, logger *common.Logger) (*MetricsCollection, error) {
+func NewMetricsCollector(ctx context.Context,
+	name, bucketName, scope string,
+	handler func(*strings.Builder, WorkflowLabelParams) error,
+	js jetstream.JetStream,
+	tracer trace.Tracer,
+	logger *common.Logger,
+	opts ...MetricsCollectorOption,
+) (*MetricsCollector, error) {
 	var err error
-	mc := &MetricsCollection{
+	mc := &MetricsCollector{
+		scope:             scope,
 		scopeLabelHandler: handler,
 		metricHandlers:    make(map[string]*MetricHandler),
+		tracer:            tracer,
+		logger:            logger,
 	}
+	// var optsSet []coordination.StoreOption[*WaitGroup]
+	// var opts []coordination.StoreOption[MetricsObjectStore]
+	// opts = append(opts, coordination.WithBucketName[MetricsObjectStore](bucketName))
+	for _, opt := range opts {
+		if err := opt(mc); err != nil {
+			return nil, err
+		}
+	}
+
 	baseStoreOpts := models.NewBaseMetricStoreOption(bucketName, scope)
+	if mc.cleanupTTL != nil {
+		baseStoreOpts = append(baseStoreOpts, coordination.WithCleanupTTL[models.BaseMetricStoreObject](*mc.cleanupTTL))
+	}
+	if mc.bucketName != nil {
+		baseStoreOpts = append(baseStoreOpts, coordination.WithBucketName[models.BaseMetricStoreObject](*mc.bucketName))
+	}
+	if mc.bucketPrefix != nil {
+		baseStoreOpts = append(baseStoreOpts, coordination.WithBucketPrefix[models.BaseMetricStoreObject](*mc.bucketPrefix))
+	}
+	if mc.retryWait != nil {
+		baseStoreOpts = append(baseStoreOpts, coordination.WithRetryWait[models.BaseMetricStoreObject](*mc.retryWait))
+	}
+	if mc.maxRetryAttempts != nil {
+		baseStoreOpts = append(baseStoreOpts, coordination.WithMaxRetryAttempts[models.BaseMetricStoreObject](*mc.maxRetryAttempts))
+	}
+
 	mc.store, err = models.NewBaseMetricStore(ctx, js, name, nil, tracer, logger, baseStoreOpts)
 	if err != nil {
 		return nil, err
 	}
 
 	mapStoreOpts := models.NewMapMetricStoreOption(bucketName, scope)
+	if mc.cleanupTTL != nil {
+		mapStoreOpts = append(mapStoreOpts, coordination.WithCleanupTTL[models.MapMetricStoreObject](*mc.cleanupTTL))
+	}
+	if mc.bucketName != nil {
+		mapStoreOpts = append(mapStoreOpts, coordination.WithBucketName[models.MapMetricStoreObject](*mc.bucketName))
+	}
+	if mc.bucketPrefix != nil {
+		mapStoreOpts = append(mapStoreOpts, coordination.WithBucketPrefix[models.MapMetricStoreObject](*mc.bucketPrefix))
+	}
+	if mc.retryWait != nil {
+		mapStoreOpts = append(mapStoreOpts, coordination.WithRetryWait[models.MapMetricStoreObject](*mc.retryWait))
+	}
+	if mc.maxRetryAttempts != nil {
+		mapStoreOpts = append(mapStoreOpts, coordination.WithMaxRetryAttempts[models.MapMetricStoreObject](*mc.maxRetryAttempts))
+	}
 	mc.mapStore, err = models.NewMapMetricStore(ctx, js, name, nil, tracer, logger, mapStoreOpts)
 	if err != nil {
 		return nil, err
@@ -249,7 +359,114 @@ func NewMetricsCollection(ctx context.Context, name, bucketName, scope string, h
 	return mc, nil
 }
 
-func (mc *MetricsCollection) AddMetric(name string, mh *MetricHandler) error {
+func (mc *MetricsCollector) InitMetric() error {
+	if err := mc.AddMetric(GetMetricRecordName(UserType), NewMetricHandler(MapStore, func(labelBuilder *strings.Builder, params WorkflowLabelParams) error {
+		if params.UserId == 0 {
+			return fmt.Errorf("invalid user id: %d", params.UserId)
+		}
+		labelBuilder.WriteString("user.")
+		labelBuilder.WriteString(strconv.FormatInt(params.UserId, 10))
+		return nil
+	})); err != nil {
+		return err
+	}
+
+	if err := mc.AddMetric(GetMetricRecordName(ClientType), NewMetricHandler(MapStore, func(labelBuilder *strings.Builder, params WorkflowLabelParams) error {
+		if params.ClientId == 0 {
+			return fmt.Errorf("invalid client id: %d", params.ClientId)
+		}
+		labelBuilder.WriteString("client.")
+		labelBuilder.WriteString(strconv.FormatInt(int64(params.ClientId), 10))
+		return nil
+	})); err != nil {
+		return err
+	}
+
+	if err := mc.AddMetric(GetMetricRecordName(SearchType), NewMetricHandler(MapStore, func(labelBuilder *strings.Builder, params WorkflowLabelParams) error {
+		if params.SearchId == 0 {
+			return fmt.Errorf("invalid search id: %d", params.SearchId)
+		}
+		labelBuilder.WriteString("search.")
+		labelBuilder.WriteString(strconv.FormatInt(params.SearchId, 10))
+		return nil
+	})); err != nil {
+		return err
+	}
+
+	if err := mc.AddMetric(GetMetricRecordName(BoardType), NewMetricHandler(BaseStore, func(labelBuilder *strings.Builder, params WorkflowLabelParams) error {
+		if params.BoardId == 0 {
+			return fmt.Errorf("invalid board id: %d", params.BoardId)
+		}
+		labelBuilder.WriteString("board.")
+		labelBuilder.WriteString(strconv.FormatInt(int64(params.BoardId), 10))
+		return nil
+	})); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (mc *MetricsCollector) ScatterGatherSearchMetrics(ctx context.Context, search *proto.Search) error {
+	spanCtx, span := mc.tracer.Start(ctx, fmt.Sprintf("scatterGather.update.search.metrics"))
+	var attrs []attribute.KeyValue
+	defer func() {
+		span.SetAttributes(attrs...)
+		span.End()
+	}()
+
+	var mrs []*MetricRecord
+
+	clientMr := NewMetricRecord(GetMetricRecordName(ClientType), mc.scope, MapStore, search)
+	if err := clientMr.Set(1, 0); err != nil {
+		return fmt.Errorf("failed to set client record: %v", err)
+	}
+
+	userMr := NewMetricRecord(GetMetricRecordName(UserType), mc.scope, MapStore, search)
+	if err := userMr.Set(1, 0); err != nil {
+		return fmt.Errorf("failed to set user metric record: %v", err)
+	}
+
+	searchMr := NewMetricRecord(GetMetricRecordName(SearchType), mc.scope, MapStore, search)
+	if err := searchMr.Set(1, 0); err != nil {
+		return fmt.Errorf("failed to set search metric record: %v", err)
+	}
+
+	for _, b := range search.Boards {
+		boardId, err := models.GetBoardType(b)
+		if err != nil {
+			mc.logger.Ctx(ctx).Sugar().Errorf("%v", err)
+			return err
+		}
+
+		boardMr := NewBoardMetricRecord(GetMetricRecordName(BoardType), mc.scope, boardId)
+		if err := boardMr.Set(1, 0); err != nil {
+			return fmt.Errorf("failed to set board metric record: %v", err)
+		}
+
+		if err := clientMr.WithMapMetricInput(boardId).Set(1, 0); err != nil {
+			return fmt.Errorf("failed to set client map metric input: %v", err)
+		}
+		if err := userMr.WithMapMetricInput(boardId).Set(1, 0); err != nil {
+			return fmt.Errorf("failed to set user map metric input: %v", err)
+		}
+
+		if err := searchMr.WithMapMetricInput(boardId).Set(1, 0); err != nil {
+			return fmt.Errorf("failed to set search map metric input: %v", err)
+		}
+
+		mrs = append(mrs, boardMr)
+	}
+
+	mrs = append(mrs, clientMr, userMr, searchMr)
+
+	if err := mc.Update(spanCtx, mrs); err != nil {
+		mc.logger.Ctx(ctx).Sugar().Errorf("failed to update metric records: %v", err)
+		return err
+	}
+	return nil
+}
+
+func (mc *MetricsCollector) AddMetric(name string, mh *MetricHandler) error {
 	mc.mu.Lock()
 	defer mc.mu.Unlock()
 
@@ -261,15 +478,15 @@ func (mc *MetricsCollection) AddMetric(name string, mh *MetricHandler) error {
 	return nil
 }
 
-func (mc *MetricsCollection) GetFromBaseStore(ctx context.Context, label string) (any, error) {
+func (mc *MetricsCollector) GetFromBaseStore(ctx context.Context, label string) (any, error) {
 	return mc.store.Get(ctx, &coordination.LabelParams{Label: label})
 }
 
-func (mc *MetricsCollection) GetFromMapStore(ctx context.Context, label string) (any, error) {
+func (mc *MetricsCollector) GetFromMapStore(ctx context.Context, label string) (any, error) {
 	return mc.mapStore.Get(ctx, &coordination.LabelParams{Label: label})
 }
 
-func (mc *MetricsCollection) Update(ctx context.Context, mrs []*MetricRecord) error {
+func (mc *MetricsCollector) Update(ctx context.Context, mrs []*MetricRecord) error {
 	var mrsMap = make(map[string]*MetricRecord)
 	for _, mr := range mrs {
 		mh, ok := mc.metricHandlers[mr.Name]
@@ -311,6 +528,7 @@ func (mc *MetricsCollection) Update(ctx context.Context, mrs []*MetricRecord) er
 			return fmt.Errorf("failed to build metric label for %s: %w", mr.Name, err)
 		}
 		label := labelBuilder.String()
+
 		if label == "" {
 			return fmt.Errorf("derived label is empty for metric %s after handlers processed", mr.Name)
 		}
@@ -345,7 +563,28 @@ func (mc *MetricsCollection) Update(ctx context.Context, mrs []*MetricRecord) er
 
 	return nil
 }
-func (mc *MetricsCollection) Close(ctx context.Context) {
+
+func (mc *MetricsCollector) WatchBaseStore(ctx context.Context, params *coordination.LabelParams, fn func(label string, obj any)) error {
+	if err := mc.store.Watch(ctx, params, func(label string, metric *models.BaseMetric) {
+		fn(label, metric)
+	}); err != nil && !errors.Is(err, context.Canceled) {
+		mc.logger.Ctx(ctx).Sugar().Errorf("failed to watch base metrics: %v", err)
+		return err
+	}
+	return nil
+}
+
+func (mc *MetricsCollector) WatchMapStore(ctx context.Context, params *coordination.LabelParams, fn func(label string, obj any)) error {
+	if err := mc.mapStore.Watch(ctx, params, func(label string, metric *models.MapMetric) {
+		fn(label, metric)
+	}); err != nil && !errors.Is(err, context.Canceled) {
+		mc.logger.Ctx(ctx).Sugar().Errorf("failed to watch ,ap metrics: %v", err)
+		return err
+	}
+	return nil
+}
+
+func (mc *MetricsCollector) Close(ctx context.Context) {
 	mc.mu.Lock()
 	defer mc.mu.Unlock()
 

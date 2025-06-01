@@ -29,7 +29,7 @@ import (
 )
 
 const (
-	totalSearch = 100
+	totalSearch = 50
 	// Workflow Stream.
 	defaultWorkflowStreamName       = "workflow"
 	defaultWorkflowStreamSubjects   = "  distributor.>;  worker.>;collector.>"
@@ -49,6 +49,9 @@ const (
 	parentMsgIdKey      = "_parent_msg_id_key"
 	originalSearchIdKey = "_original_search_id_key"
 	originalBoardKey    = "_original_board_key"
+
+	defaultWorkflowMetricsBucketName = "metrics"
+	defaultWorkflowMetricsScope      = "workflow.metrics"
 )
 
 var totalSearchesSend int32 = 0
@@ -361,6 +364,40 @@ var serveWorkerFlow = &cli.Command{
 			}
 		}()
 
+		metricsBucketName := defaultWorkflowMetricsBucketName
+		metricsScope := defaultWorkflowMetricsScope
+		var metricsOpts []handlers.MetricsCollectorOption
+		metricsOpts = append(metricsOpts, handlers.WithCleanupTTL(64*time.Hour))
+		mc, err := handlers.NewMetricsCollector(sc.ctx,
+			"worker",
+			metricsBucketName,
+			metricsScope,
+			func(labelBuilder *strings.Builder, params handlers.WorkflowLabelParams) error {
+				if params.Scope != "" {
+					labelBuilder.WriteString(params.Scope)
+					labelBuilder.WriteString(".")
+				}
+
+				return nil
+			},
+			sc.js,
+			sc.tracer,
+			sc.logger,
+			metricsOpts...,
+		)
+		if err != nil {
+			return err
+		}
+		defer mc.Close(sc.ctx)
+
+		go func() {
+			if err := mc.WatchMapStore(sc.ctx, &coordination.LabelParams{Label: "workflow.metrics.client.*"}, func(label string, obj any) {
+				fmt.Printf("metrics_collection.Watch :%s %+v\n", label, obj)
+			}); err != nil {
+				sc.logger.Ctx(sc.ctx).Error("watch metrics collection watch error", zap.Error(err))
+			}
+		}()
+
 		streamSearchesName := defaultWorkflowStreamName
 		streamSearchesCleanupTtl := defaultWorkflowStreamCleanupTtl
 		var streamSearchesSubjects []string
@@ -491,6 +528,43 @@ var serveScatterGatherFlow = &cli.Command{
 			}
 		}()
 
+		metricsBucketName := defaultWorkflowMetricsBucketName
+		metricsScope := defaultWorkflowMetricsScope
+
+		// todo debug
+		err = sc.js.DeleteKeyValue(sc.ctx, metricsBucketName)
+		if err != nil {
+			return err
+		}
+
+		var metricsOpts []handlers.MetricsCollectorOption
+		metricsOpts = append(metricsOpts, handlers.WithCleanupTTL(64*time.Hour))
+		mc, err := handlers.NewMetricsCollector(sc.ctx,
+			"scatterGather",
+			metricsBucketName,
+			metricsScope,
+			func(labelBuilder *strings.Builder, params handlers.WorkflowLabelParams) error {
+				if params.Scope != "" {
+					labelBuilder.WriteString(params.Scope)
+					labelBuilder.WriteString(".")
+				}
+
+				return nil
+			},
+			sc.js,
+			sc.tracer,
+			sc.logger,
+			metricsOpts...,
+		)
+		if err != nil {
+			return err
+		}
+		defer mc.Close(sc.ctx)
+
+		if err := mc.InitMetric(); err != nil {
+			return err
+		}
+
 		streamSearchesName := defaultWorkflowStreamName
 		var streamSearchesSubjects []string
 		for _, sub := range strings.Split(defaultWorkflowStreamSubjects, ";") {
@@ -542,8 +616,7 @@ var serveScatterGatherFlow = &cli.Command{
 		//if err != nil {
 		//	return err
 		//}
-		counter := NewFlowCounter()
-		sinkHandlers, err := handlers.NewSinkHandlers[*stream.Message](sc.ctx, sc.js, counter, sc.tracer, sc.logger)
+		sinkHandlers, err := handlers.NewSinkHandlers[*stream.Message](sc.ctx, sc.js, mc, sc.tracer, sc.logger)
 		if err != nil {
 			return err
 		}
@@ -755,6 +828,7 @@ func (cdc *CdcSource) Run() error {
 
 				s := proto.Search{
 					Id:       id,
+					UserId:   1,
 					ClientId: 1,
 					Boards:   []string{},
 				}

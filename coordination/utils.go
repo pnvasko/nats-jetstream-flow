@@ -17,6 +17,16 @@ func getJitter() time.Duration {
 	return 100 + defaultMaxProcessingJitter
 }
 
+func isJSConsumerNotFound(err error) bool {
+	var apiErr *jetstream.APIError
+
+	ok := errors.As(err, &apiErr)
+	if !ok {
+		return false
+	}
+	return apiErr.ErrorCode == jetstream.JSErrCodeConsumerNotFound // || apiErr.ErrorCode == 10058
+}
+
 func isJSAlreadyExistsError(err error) bool {
 	var apiErr *jetstream.APIError
 

@@ -174,7 +174,6 @@ func NewStreamSinkProducer[T flow.Message](ctx context.Context,
 		msgCompleteSpanCtx, msgCompleteSpan := ss.tracer.Start(ctx, fmt.Sprintf("%s.message.complete", ss.spanName))
 
 		defer func() {
-			fmt.Println("todo.completePool.defer")
 			if x := recover(); x != nil {
 				ss.logger.Ctx(ss.ctx).Error("complete future error", zap.Error(fmt.Errorf("%v", x)))
 			}

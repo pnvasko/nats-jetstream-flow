@@ -10,6 +10,9 @@ import (
 	"go.opentelemetry.io/otel/trace"
 )
 
+type BaseMetricStoreObject = *coordination.ObjectStore[*BaseMetric, *BaseMetricInput]
+type BaseMetricStoreOption []coordination.StoreOption[BaseMetricStoreObject]
+
 type BaseMetricStore struct {
 	*coordination.ObjectStore[*BaseMetric, *BaseMetricInput]
 }
@@ -54,12 +57,11 @@ func NewBaseMetricFactory(name string, labelFactory func(any) (string, error)) f
 	}
 }
 
-type BaseMetricStoreOption []coordination.StoreOption[*coordination.ObjectStore[*BaseMetric, *BaseMetricInput]]
-
-func NewBaseMetricStoreOption(bucketName, scope string) BaseMetricStoreOption {
-	var storeOpts []coordination.StoreOption[*coordination.ObjectStore[*BaseMetric, *BaseMetricInput]]
-	storeOpts = append(storeOpts, coordination.WithBucketName[*coordination.ObjectStore[*BaseMetric, *BaseMetricInput]](bucketName))
-	storeOpts = append(storeOpts, coordination.WithScope[*coordination.ObjectStore[*BaseMetric, *BaseMetricInput]](scope))
+func NewBaseMetricStoreOption(bucketName, scope string, opts ...coordination.StoreOption[BaseMetricStoreObject]) BaseMetricStoreOption {
+	var storeOpts []coordination.StoreOption[BaseMetricStoreObject]
+	storeOpts = append(storeOpts, coordination.WithBucketName[BaseMetricStoreObject](bucketName))
+	storeOpts = append(storeOpts, coordination.WithScope[BaseMetricStoreObject](scope))
+	storeOpts = append(storeOpts, opts...)
 	return storeOpts
 }
 

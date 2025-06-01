@@ -50,7 +50,7 @@ func BenchmarkMetrics(b *testing.B) {
 			_ = uptrace.ForceFlush(ctx)
 			_ = uptrace.Shutdown(ctx)
 		}()
-		kv := prepareKVStore(b, tc, mainCtx)
+		kv := prepareKVStore(b, tc, mainCtx, bucketName)
 		require.NotNil(b, kv)
 		//companyTotal := 10
 		//usersTotal := 100
@@ -181,7 +181,7 @@ func TestMetrics(t *testing.T) {
 			_ = uptrace.Shutdown(ctx)
 		}()
 
-		kv := prepareKVStore(t, tc, mainCtx)
+		kv := prepareKVStore(t, tc, mainCtx, bucketName)
 		require.NotNil(t, kv)
 
 		scope := "test_scope_create"
@@ -513,8 +513,9 @@ func TestMetrics(t *testing.T) {
 
 		expectedOverallCounts, expectedBoardSubCounts, expectedLabels, err := calculateExpectedMetrics(searches, scope)
 		require.NoError(t, err, "Failed to calculate expected metrics")
-
-		mc, err := handlers.NewMetricsCollection(mainCtx,
+		var mcOpts []handlers.MetricsCollectorOption
+		mcOpts = append(mcOpts, handlers.WithCleanupTTL(64*time.Hour))
+		mc, err := handlers.NewMetricsCollector(mainCtx,
 			"scatterGather",
 			bucketName,
 			scope,
@@ -529,6 +530,7 @@ func TestMetrics(t *testing.T) {
 			tc.js,
 			tc.tracer,
 			tc.logger,
+			mcOpts...,
 		)
 		require.NoError(t, err)
 		require.NotNil(t, mc)
@@ -543,104 +545,122 @@ func TestMetrics(t *testing.T) {
 			mc.Close(mainCtx)
 		}()
 
-		err = mc.AddMetric(handlers.GetMetricRecordName(handlers.UserType), handlers.NewMetricHandler(handlers.MapStore, func(labelBuilder *strings.Builder, params handlers.WorkflowLabelParams) error {
-			if params.UserId == 0 {
-				return fmt.Errorf("invalid user id: %d", params.UserId)
-			}
-			labelBuilder.WriteString("user.")
-			labelBuilder.WriteString(strconv.FormatInt(params.UserId, 10))
-			return nil
-		}))
+		err = mc.InitMetric()
+		require.NoError(t, err)
 
-		err = mc.AddMetric(handlers.GetMetricRecordName(handlers.ClientType), handlers.NewMetricHandler(handlers.MapStore, func(labelBuilder *strings.Builder, params handlers.WorkflowLabelParams) error {
-			if params.ClientId == 0 {
-				return fmt.Errorf("invalid client id: %d", params.ClientId)
-			}
-			labelBuilder.WriteString("client.")
-			labelBuilder.WriteString(strconv.FormatInt(int64(params.ClientId), 10))
-			return nil
-		}))
-
-		err = mc.AddMetric(handlers.GetMetricRecordName(handlers.SearchType), handlers.NewMetricHandler(handlers.MapStore, func(labelBuilder *strings.Builder, params handlers.WorkflowLabelParams) error {
-			if params.SearchId == 0 {
-				return fmt.Errorf("invalid search id: %d", params.SearchId)
-			}
-			labelBuilder.WriteString("search.")
-			labelBuilder.WriteString(strconv.FormatInt(params.SearchId, 10))
-			return nil
-		}))
-
-		err = mc.AddMetric(handlers.GetMetricRecordName(handlers.BoardType), handlers.NewMetricHandler(handlers.BaseStore, func(labelBuilder *strings.Builder, params handlers.WorkflowLabelParams) error {
-			if params.BoardId == 0 {
-				return fmt.Errorf("invalid board id: %d", params.BoardId)
-			}
-			labelBuilder.WriteString("board.")
-			labelBuilder.WriteString(strconv.FormatInt(int64(params.BoardId), 10))
-			return nil
-		}))
+		//err = mc.AddMetric(handlers.GetMetricRecordName(handlers.UserType), handlers.NewMetricHandler(handlers.MapStore, func(labelBuilder *strings.Builder, params handlers.WorkflowLabelParams) error {
+		//	if params.UserId == 0 {
+		//		return fmt.Errorf("invalid user id: %d", params.UserId)
+		//	}
+		//	labelBuilder.WriteString("user.")
+		//	labelBuilder.WriteString(strconv.FormatInt(params.UserId, 10))
+		//	return nil
+		//}))
+		//
+		//err = mc.AddMetric(handlers.GetMetricRecordName(handlers.ClientType), handlers.NewMetricHandler(handlers.MapStore, func(labelBuilder *strings.Builder, params handlers.WorkflowLabelParams) error {
+		//	if params.ClientId == 0 {
+		//		return fmt.Errorf("invalid client id: %d", params.ClientId)
+		//	}
+		//	labelBuilder.WriteString("client.")
+		//	labelBuilder.WriteString(strconv.FormatInt(int64(params.ClientId), 10))
+		//	return nil
+		//}))
+		//
+		//err = mc.AddMetric(handlers.GetMetricRecordName(handlers.SearchType), handlers.NewMetricHandler(handlers.MapStore, func(labelBuilder *strings.Builder, params handlers.WorkflowLabelParams) error {
+		//	if params.SearchId == 0 {
+		//		return fmt.Errorf("invalid search id: %d", params.SearchId)
+		//	}
+		//	labelBuilder.WriteString("search.")
+		//	labelBuilder.WriteString(strconv.FormatInt(params.SearchId, 10))
+		//	return nil
+		//}))
+		//
+		//err = mc.AddMetric(handlers.GetMetricRecordName(handlers.BoardType), handlers.NewMetricHandler(handlers.BaseStore, func(labelBuilder *strings.Builder, params handlers.WorkflowLabelParams) error {
+		//	if params.BoardId == 0 {
+		//		return fmt.Errorf("invalid board id: %d", params.BoardId)
+		//	}
+		//	labelBuilder.WriteString("board.")
+		//	labelBuilder.WriteString(strconv.FormatInt(int64(params.BoardId), 10))
+		//	return nil
+		//}))
 
 		totalSearches := uint64(0)
 		totalSearchesByUser := make(map[int64]*uint64)
 		totalBoards := uint64(0)
 
 		for _, search := range searches {
-			var mrs []*handlers.MetricRecord
 			atomic.AddUint64(&totalSearches, 1)
 			if _, ok := totalSearchesByUser[search.UserId]; !ok {
 				val := uint64(0)
 				totalSearchesByUser[search.UserId] = &val
 			}
 			atomic.AddUint64(totalSearchesByUser[search.UserId], 1)
-			clientMr := handlers.NewMetricRecord(handlers.GetMetricRecordName(handlers.ClientType), scope, handlers.MapStore, search)
-			if err := clientMr.Set(1, 0); err != nil {
-				t.Errorf("failed to set client record: %v", err)
-			}
-
-			userMr := handlers.NewMetricRecord(handlers.GetMetricRecordName(handlers.UserType), scope, handlers.MapStore, search)
-			if err := userMr.Set(1, 0); err != nil {
-				t.Errorf("failed to set user metric record: %v", err)
-			}
-
-			searchMr := handlers.NewMetricRecord(handlers.GetMetricRecordName(handlers.SearchType), scope, handlers.MapStore, search)
-			if err := searchMr.Set(1, 0); err != nil {
-				t.Errorf("failed to set search metric record: %v", err)
-			}
-
-			for _, b := range search.Boards {
+			for _, _ = range search.Boards {
 				atomic.AddUint64(&totalBoards, 1)
-				boardId, err := models.GetBoardType(b)
-				if err != nil {
-					tc.logger.Ctx(mainCtx).Sugar().Errorf("%v", err)
-					continue
-				}
-
-				boardMr := handlers.NewBoardMetricRecord(handlers.GetMetricRecordName(handlers.BoardType), scope, boardId)
-				if err := boardMr.Set(1, 0); err != nil {
-					t.Errorf("failed to set board metric record: %v", err)
-				}
-
-				if err := clientMr.WithMapMetricInput(boardId).Set(1, 0); err != nil {
-					t.Errorf("failed to set client map metric input: %v", err)
-					continue
-				}
-				if err := userMr.WithMapMetricInput(boardId).Set(1, 0); err != nil {
-					t.Errorf("failed to set user map metric input: %v", err)
-					continue
-				}
-
-				if err := searchMr.WithMapMetricInput(boardId).Set(1, 0); err != nil {
-					t.Errorf("failed to set search map metric input: %v", err)
-					continue
-				}
-				// t.Logf("search %d, %d; boardMr: %+v\n", search.Id, boardId, boardMr)
-				mrs = append(mrs, boardMr)
 			}
-
-			mrs = append(mrs, clientMr, userMr, searchMr)
-
-			err = mc.Update(mainCtx, mrs)
+			err = mc.ScatterGatherSearchMetrics(mainCtx, search)
 			require.NoError(t, err)
 		}
+		//
+		//for _, search := range searches {
+		//	var mrs []*handlers.MetricRecord
+		//	atomic.AddUint64(&totalSearches, 1)
+		//	if _, ok := totalSearchesByUser[search.UserId]; !ok {
+		//		val := uint64(0)
+		//		totalSearchesByUser[search.UserId] = &val
+		//	}
+		//	atomic.AddUint64(totalSearchesByUser[search.UserId], 1)
+		//	clientMr := handlers.NewMetricRecord(handlers.GetMetricRecordName(handlers.ClientType), scope, handlers.MapStore, search)
+		//	if err := clientMr.Set(1, 0); err != nil {
+		//		t.Errorf("failed to set client record: %v", err)
+		//	}
+		//
+		//	userMr := handlers.NewMetricRecord(handlers.GetMetricRecordName(handlers.UserType), scope, handlers.MapStore, search)
+		//	if err := userMr.Set(1, 0); err != nil {
+		//		t.Errorf("failed to set user metric record: %v", err)
+		//	}
+		//
+		//	searchMr := handlers.NewMetricRecord(handlers.GetMetricRecordName(handlers.SearchType), scope, handlers.MapStore, search)
+		//	if err := searchMr.Set(1, 0); err != nil {
+		//		t.Errorf("failed to set search metric record: %v", err)
+		//	}
+		//
+		//	for _, b := range search.Boards {
+		//		atomic.AddUint64(&totalBoards, 1)
+		//		boardId, err := models.GetBoardType(b)
+		//		if err != nil {
+		//			tc.logger.Ctx(mainCtx).Sugar().Errorf("%v", err)
+		//			continue
+		//		}
+		//
+		//		boardMr := handlers.NewBoardMetricRecord(handlers.GetMetricRecordName(handlers.BoardType), scope, boardId)
+		//		if err := boardMr.Set(1, 0); err != nil {
+		//			t.Errorf("failed to set board metric record: %v", err)
+		//		}
+		//
+		//		if err := clientMr.WithMapMetricInput(boardId).Set(1, 0); err != nil {
+		//			t.Errorf("failed to set client map metric input: %v", err)
+		//			continue
+		//		}
+		//		if err := userMr.WithMapMetricInput(boardId).Set(1, 0); err != nil {
+		//			t.Errorf("failed to set user map metric input: %v", err)
+		//			continue
+		//		}
+		//
+		//		if err := searchMr.WithMapMetricInput(boardId).Set(1, 0); err != nil {
+		//			t.Errorf("failed to set search map metric input: %v", err)
+		//			continue
+		//		}
+		//		// t.Logf("search %d, %d; boardMr: %+v\n", search.Id, boardId, boardMr)
+		//		mrs = append(mrs, boardMr)
+		//	}
+		//
+		//	mrs = append(mrs, clientMr, userMr, searchMr)
+		//
+		//	err = mc.Update(mainCtx, mrs)
+		//	require.NoError(t, err)
+		//}
+		//
 		time.Sleep(200 * time.Millisecond)
 
 		kv, err := tc.js.KeyValue(mainCtx, bucketName)
@@ -929,20 +949,35 @@ func getTestContext(t testingBT) (*TestContext, error) {
 }
 
 // func prepareKVStore(b *testing.B, tc *TestContext, ctx context.Context) jetstream.KeyValue {
-func prepareKVStore(t testingBT, tc *TestContext, ctx context.Context) jetstream.KeyValue {
-	kv, _ := tc.js.KeyValue(ctx, bucketName)
+func prepareKVStore(t testingBT, tc *TestContext, ctx context.Context, bucket string) jetstream.KeyValue {
+	kv, _ := tc.js.KeyValue(ctx, bucket)
 	if kv != nil {
-		_ = tc.js.DeleteKeyValue(ctx, bucketName)
+		_ = tc.js.DeleteKeyValue(ctx, bucket)
 	}
+
 	cfg := jetstream.KeyValueConfig{
-		Bucket:      bucketName,
+		Bucket:      bucket,
 		Description: "Benchmarking KV store",
 		TTL:         60 * time.Second,
 		History:     1,
 	}
+
 	kv, err := tc.js.CreateKeyValue(ctx, cfg)
-	require.NoError(t, err)
+	if isJSAlreadyExistsError(err) {
+		kv, err = tc.js.KeyValue(ctx, bucket)
+		require.NoError(t, err)
+	}
 	return kv
+}
+
+func isJSAlreadyExistsError(err error) bool {
+	var apiErr *jetstream.APIError
+
+	ok := errors.As(err, &apiErr)
+	if !ok {
+		return false
+	}
+	return apiErr.ErrorCode == jetstream.JSErrCodeStreamNameInUse // || apiErr.ErrorCode == 10058
 }
 
 func workflowLabelFactory(params any) (string, error) {

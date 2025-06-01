@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"github.com/nats-io/nats.go/jetstream"
 	"github.com/pnvasko/nats-jetstream-flow/common"
+	proto "github.com/pnvasko/nats-jetstream-flow/proto/v1"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
 	"sync"
@@ -54,7 +55,12 @@ type ObjectStore[T Object, R any] struct {
 	cancel context.CancelFunc
 	ctxMu  sync.RWMutex
 
-	mu sync.RWMutex // Protects RMW cycle within a single client instance
+	mu        sync.RWMutex // Protects RMW cycle within a single client instance
+	onceStart sync.Once
+	closing   chan struct{}
+
+	watchers        map[string]jetstream.KeyWatcher
+	watcherHandlers map[string]map[context.Context]func(T)
 
 	mutexLock   sync.Mutex
 	mutexObject map[string]*labelMutex
@@ -72,7 +78,13 @@ type ObjectStore[T Object, R any] struct {
 	logger *common.Logger
 }
 
-func NewObjectStore[T Object, UpdateInput any](ctx context.Context, js jetstream.JetStream, factory func() T, tracer trace.Tracer, logger *common.Logger, opts ...StoreOption[*ObjectStore[T, UpdateInput]]) (*ObjectStore[T, UpdateInput], error) {
+func NewObjectStore[T Object, UpdateInput any](ctx context.Context,
+	js jetstream.JetStream,
+	factory func() T,
+	tracer trace.Tracer,
+	logger *common.Logger,
+	opts ...StoreOption[*ObjectStore[T, UpdateInput]],
+) (*ObjectStore[T, UpdateInput], error) {
 	object := factory()
 	spanName := object.SpanName()
 	m := &ObjectStore[T, UpdateInput]{
@@ -82,7 +94,10 @@ func NewObjectStore[T Object, UpdateInput any](ctx context.Context, js jetstream
 			maxRetryAttempts: defaultMaxRetryAttempts,
 			cleanupTTL:       defaultCleanupTTL,
 		},
-		js:            js,
+		js:              js,
+		watchers:        make(map[string]jetstream.KeyWatcher),
+		watcherHandlers: make(map[string]map[context.Context]func(T)),
+
 		objectFactory: factory,
 		mutexObject:   make(map[string]*labelMutex),
 
@@ -293,7 +308,7 @@ func (m *ObjectStore[T, R]) Reset(ctx context.Context, params *LabelParams) erro
 	return fmt.Errorf("object reset failed after %d attempts due to conflicts: last error: %w", m.maxRetryAttempts, lastErr)
 }
 
-func (m *ObjectStore[T, R]) Watch(ctx context.Context, params *LabelParams, fn func(T)) error {
+func (m *ObjectStore[T, R]) Watch(ctx context.Context, params *LabelParams, fn func(string, T)) error {
 	label, err := m.resolveLabel(params) // Use the new resolver
 	if err != nil {
 		return fmt.Errorf("failed to resolve label: %w", err) // Add context to the error
@@ -301,34 +316,18 @@ func (m *ObjectStore[T, R]) Watch(ctx context.Context, params *LabelParams, fn f
 	var watcher jetstream.KeyWatcher
 	defer func() {
 		if watcher != nil {
-			if err := watcher.Stop(); err != nil { // Best effort stop
-				m.logger.Ctx(context.Background()).Sugar().Errorf("failed to stop watcher [%s]: %s", label, err.Error())
+			if err := watcher.Stop(); err != nil && isJSConsumerNotFound(err) {
+				logCtx := m.Context()
+				if logCtx == nil || logCtx.Err() != nil { // Fallback if store ctx is done
+					logCtx = context.Background()
+				}
+				m.logger.Ctx(logCtx).Sugar().Errorf("failed to stop watcher [%s]: %s", label, err.Error())
 			}
-			watcher = nil
 		}
 	}()
-	//fmt.Println("Watch.Get")
-	//for {
-	//	entry, err := m.kv.Get(ctx, label)
-	//	if err != nil {
-	//		if errors.Is(err, jetstream.ErrKeyNotFound) || errors.Is(err, jetstream.ErrKeyDeleted) {
-	//			time.Sleep(m.retryWait)
-	//			continue
-	//		}
-	//		return fmt.Errorf("failed to get state for '%s': %s", label, err.Error())
-	//	}
-	//	var object T = m.objectFactory(m.name)
-	//	err = object.UnmarshalVT(entry.Value())
-	//	if err != nil {
-	//		return fmt.Errorf("failed to unmarshal objects state: %s", err.Error())
-	//	}
-	//	fn(object)
-	//	break
-	//}
-	//fmt.Println("Watch.watching")
+
 	for {
 		if watcher == nil {
-			// watcher, err = m.kv.Watch(ctx, label, jetstream.UpdatesOnly())
 			watcher, err = m.kv.Watch(ctx, label)
 			if err != nil {
 				select {
@@ -339,28 +338,46 @@ func (m *ObjectStore[T, R]) Watch(ctx context.Context, params *LabelParams, fn f
 				default:
 				}
 				if errors.Is(err, jetstream.ErrBucketNotFound) || errors.Is(err, jetstream.ErrKeyNotFound) {
-					time.Sleep(m.retryWait)
+					m.logger.Ctx(ctx).Sugar().Warnf("watcher [%s] not found (bucket or key), retrying: %s", label, err.Error())
+					if err := m.sleepWithContext(ctx); err != nil {
+						return err
+					}
 					continue
 				}
 				return fmt.Errorf("failed to watch state for '%s': %s", label, err.Error())
 			}
 		}
+
 		select {
 		case entry, ok := <-watcher.Updates():
 			if !ok {
 				m.logger.Ctx(ctx).Sugar().Warnf("watcher [%s] updates channel closed unexpectedly.", label)
-				time.Sleep(m.retryWait)
+				if err := m.sleepWithContext(ctx); err != nil {
+					return err
+				}
 				watcher = nil
 				continue
 			}
 			if entry != nil {
 				m.logger.Ctx(ctx).Sugar().Debugf("watcher [%s] received update: op=%s, looping to retry wait.", label, entry.Operation())
 				var object T = m.objectFactory()
+				if entry.Operation() == jetstream.KeyValueDelete {
+					m.logger.Ctx(ctx).Sugar().Debugf("watcher [%s] received delete operation.", label)
+					continue
+				}
+				if len(entry.Value()) == 0 && entry.Operation() != jetstream.KeyValuePut {
+					m.logger.Ctx(ctx).Sugar().Debugf("watcher [%s] received non-PUT entry with empty value, skipping unmarshal.", label)
+					continue
+				}
 				err = object.UnmarshalVT(entry.Value())
 				if err != nil {
-					m.logger.Ctx(ctx).Sugar().Errorf("failed to unmarshal objects state: %s", err.Error())
+					m.logger.Ctx(ctx).Sugar().Errorf("failed to unmarshal object key: [%s]; type: [%T]; len [%d] state: %v", label, object, err)
+					continue
 				}
-				fn(object)
+				fn(entry.Key(), object)
+			} else {
+				m.logger.Ctx(ctx).Sugar().Debugf("watcher [%s] received nil entry.", label)
+				continue
 			}
 		case <-m.Context().Done():
 			return m.Context().Err()
@@ -369,6 +386,269 @@ func (m *ObjectStore[T, R]) Watch(ctx context.Context, params *LabelParams, fn f
 		}
 	}
 }
+
+func (m *ObjectStore[T, R]) todoLabelWatch(ctx context.Context, params *LabelParams, fn func(T)) error {
+	label, err := m.resolveLabel(params) // Use the new resolver
+	if err != nil {
+		return fmt.Errorf("failed to resolve label: %w", err) // Add context to the error
+	}
+	m.mu.Lock()
+	if existingWatcher, ok := m.watchers[label]; ok && existingWatcher != nil {
+		m.mu.Unlock()
+		return fmt.Errorf("watcher already exists for label: %s", label)
+		// Option: Return something else (e.g., a channel to signal stop)
+		// return &ExistingWatcherError{Label: label} // Define a specific error type
+	}
+	m.watchers[label] = nil
+	m.mu.Unlock()
+	defer func() {
+		m.mu.Lock()
+		watcher := m.watchers[label]
+		m.watchers[label] = nil
+		m.mu.Unlock()
+		if watcher != nil {
+			if err := watcher.Stop(); err != nil && isJSConsumerNotFound(err) {
+				logCtx := m.Context()
+				if logCtx == nil || logCtx.Err() != nil { // Fallback if store ctx is done
+					logCtx = context.Background()
+				}
+				m.logger.Ctx(logCtx).Sugar().Errorf("failed to stop watcher [%s]: %s", label, err.Error())
+			}
+		}
+	}()
+
+	for {
+		var currentWatcher jetstream.KeyWatcher
+		m.mu.Lock()
+		currentWatcher = m.watchers[label] // Get the current watcher assigned to this label
+		m.mu.Unlock()
+		fmt.Printf("currentWatcher: %s: %+v\n", label, currentWatcher)
+		if currentWatcher == nil {
+			var newWatcher jetstream.KeyWatcher
+			newWatcher, err = m.kv.Watch(ctx, label)
+			if err != nil {
+				select {
+				case <-m.Context().Done(): // Check store context
+					return m.Context().Err()
+				case <-ctx.Done(): // Check watch context
+					return ctx.Err()
+				default:
+				}
+				if errors.Is(err, jetstream.ErrBucketNotFound) || errors.Is(err, jetstream.ErrKeyNotFound) {
+					m.logger.Ctx(ctx).Sugar().Warnf("watcher [%s] not found (bucket or key), retrying: %s", label, err.Error())
+					if err := m.sleepWithContext(ctx); err != nil {
+						return err
+					}
+				}
+				return fmt.Errorf("failed to watch state for '%s': %s", label, err.Error())
+			}
+
+			m.mu.Lock()
+			if m.watchers[label] == nil {
+				m.watchers[label] = newWatcher
+				currentWatcher = newWatcher // Update the local variable for the select
+			} else {
+				m.mu.Unlock()
+				if stopErr := newWatcher.Stop(); stopErr != nil {
+					m.logger.Ctx(context.Background()).Sugar().Errorf("failed to stop redundant watcher for [%s]: %s", label, stopErr.Error())
+				}
+				continue
+			}
+			m.mu.Unlock()
+		}
+		select {
+		case entry, ok := <-currentWatcher.Updates():
+			if !ok {
+				m.logger.Ctx(ctx).Sugar().Warnf("watcher [%s] updates channel closed unexpectedly.", label)
+				if err := m.sleepWithContext(ctx); err != nil {
+					return err
+				}
+				m.mu.Lock()
+				m.watchers[label] = nil
+				m.mu.Unlock()
+				continue
+			}
+			if entry != nil {
+				m.logger.Ctx(ctx).Sugar().Debugf("watcher [%s] received update: op=%s, looping to retry wait.", label, entry.Operation())
+				var object T = m.objectFactory()
+				if entry.Operation() == jetstream.KeyValueDelete {
+					m.logger.Ctx(ctx).Sugar().Debugf("watcher [%s] received delete operation.", label)
+					fn(object)
+					continue
+				}
+				if len(entry.Value()) == 0 && entry.Operation() != jetstream.KeyValuePut {
+					m.logger.Ctx(ctx).Sugar().Debugf("watcher [%s] received non-PUT entry with empty value, skipping unmarshal.", label)
+					continue
+				}
+				err = object.UnmarshalVT(entry.Value())
+				if err != nil {
+					m.logger.Ctx(ctx).Sugar().Warnf("failed to unmarshal state key [%s] object to [%T]: %s", entry.Key(), object, err.Error())
+					// m.logger.Ctx(ctx).Sugar().Errorf("failed to unmarshal state key [%s] object to [%T]: %s", entry.Key(), object, err.Error())
+					continue
+				}
+				fn(object)
+			} else {
+				m.logger.Ctx(ctx).Sugar().Debugf("watcher [%s] received nil entry.", label)
+			}
+		case <-m.Context().Done():
+			return m.Context().Err()
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+}
+
+func (m *ObjectStore[T, R]) sleepWithContext(ctx context.Context) error {
+	select {
+	case <-time.After(m.retryWait):
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+//
+//func (m *ObjectStore[T, R]) todoManyWatcherWatch(ctx context.Context, params *LabelParams, fn func(T)) error {
+//	label, err := m.resolveLabel(params) // Use the new resolver
+//	if err != nil {
+//		return fmt.Errorf("failed to resolve label: %w", err) // Add context to the error
+//	}
+//	m.mu.Lock()
+//	if existingWatcher, ok := m.watchers[label]; ok && existingWatcher != nil {
+//		if _, ok := m.watcherHandlers[label]; !ok {
+//			m.watcherHandlers[label] = map[context.Context]func(T){}
+//		}
+//		if _, ok := m.watcherHandlers[label][ctx]; !ok {
+//			m.watcherHandlers[label][ctx] = fn
+//		}
+//		m.mu.Unlock()
+//		return fmt.Errorf("watcher already exists for label: %s", label)
+//		// Option: Return something else (e.g., a channel to signal stop)
+//		// return &ExistingWatcherError{Label: label} // Define a specific error type
+//	}
+//	m.watchers[label] = nil
+//	if _, ok := m.watcherHandlers[label]; !ok {
+//		m.watcherHandlers[label] = map[context.Context]func(T){}
+//	}
+//	if _, ok := m.watcherHandlers[label][ctx]; !ok {
+//		m.watcherHandlers[label][ctx] = fn
+//	}
+//	m.mu.Unlock()
+//
+//	defer func() {
+//		m.mu.Lock()
+//		watcher := m.watchers[label]
+//		m.watchers[label] = nil
+//		m.watcherHandlers[label] = map[context.Context]func(T){}
+//		m.mu.Unlock()
+//
+//		if watcher != nil {
+//			if err := watcher.Stop(); err != nil && isJSConsumerNotFound(err) {
+//				logCtx := m.Context()
+//				if logCtx == nil || logCtx.Err() != nil { // Fallback if store ctx is done
+//					logCtx = context.Background()
+//				}
+//				m.logger.Ctx(logCtx).Sugar().Errorf("failed to stop watcher [%s]: %s", label, err.Error())
+//			}
+//		}
+//	}()
+//
+//	for {
+//		var currentWatcher jetstream.KeyWatcher
+//		m.mu.Lock()
+//		currentWatcher = m.watchers[label] // Get the current watcher assigned to this label
+//		m.mu.Unlock()
+//
+//		if currentWatcher == nil {
+//			var newWatcher jetstream.KeyWatcher
+//			newWatcher, err = m.kv.Watch(ctx, label)
+//			if err != nil {
+//				select {
+//				case <-m.Context().Done(): // Check store context
+//					return m.Context().Err()
+//				case <-ctx.Done(): // Check watch context
+//					return ctx.Err()
+//				default:
+//				}
+//				if errors.Is(err, jetstream.ErrBucketNotFound) || errors.Is(err, jetstream.ErrKeyNotFound) {
+//					m.logger.Ctx(ctx).Sugar().Warnf("watcher [%s] not found (bucket or key), retrying: %s", label, err.Error())
+//					time.Sleep(m.retryWait)
+//					continue // Retry watch creation
+//				}
+//				return fmt.Errorf("failed to watch state for '%s': %s", label, err.Error())
+//			}
+//
+//			m.mu.Lock()
+//			if m.watchers[label] == nil {
+//				m.watchers[label] = newWatcher
+//				currentWatcher = newWatcher // Update the local variable for the select
+//			} else {
+//				m.mu.Unlock()
+//				if stopErr := newWatcher.Stop(); stopErr != nil {
+//					m.logger.Ctx(context.Background()).Sugar().Errorf("failed to stop redundant watcher for [%s]: %s", label, stopErr.Error())
+//				}
+//				continue
+//			}
+//			m.mu.Unlock()
+//		}
+//
+//		select {
+//		case entry, ok := <-currentWatcher.Updates():
+//			if !ok {
+//				m.logger.Ctx(ctx).Sugar().Warnf("watcher [%s] updates channel closed unexpectedly.", label)
+//				time.Sleep(m.retryWait)
+//				m.mu.Lock()
+//				m.watchers[label] = nil
+//				m.mu.Unlock()
+//				continue
+//			}
+//			if entry != nil {
+//				m.logger.Ctx(ctx).Sugar().Debugf("watcher [%s] received update: op=%s, looping to retry wait.", label, entry.Operation())
+//				var object T = m.objectFactory()
+//				if entry.Operation() == jetstream.KeyValueDelete {
+//					m.logger.Ctx(ctx).Sugar().Debugf("watcher [%s] received delete operation.", label)
+//					fn(object)
+//					continue
+//				}
+//				if len(entry.Value()) == 0 && entry.Operation() != jetstream.KeyValuePut {
+//					m.logger.Ctx(ctx).Sugar().Debugf("watcher [%s] received non-PUT entry with empty value, skipping unmarshal.", label)
+//					continue
+//				}
+//				err = object.UnmarshalVT(entry.Value())
+//				if err != nil {
+//					m.logger.Ctx(ctx).Sugar().Warnf("failed to unmarshal state key [%s] object to [%T]: %s", entry.Key(), object, err.Error())
+//					// m.logger.Ctx(ctx).Sugar().Errorf("failed to unmarshal state key [%s] object to [%T]: %s", entry.Key(), object, err.Error())
+//					continue
+//				}
+//				fmt.Println("watcherHandlers len", label, len(m.watcherHandlers[label]))
+//				for _, f := range m.watcherHandlers[label] {
+//					f(object)
+//				}
+//				// fn(object)
+//			} else {
+//				m.logger.Ctx(ctx).Sugar().Debugf("watcher [%s] received nil entry.", label)
+//			}
+//		case <-m.Context().Done():
+//			return m.Context().Err()
+//		case <-ctx.Done():
+//			fmt.Printf("ctx done: %v", ctx.Err())
+//			fmt.Println("watcherHandlers: ", len(m.watcherHandlers[label]))
+//			m.mu.Lock()
+//			delete(m.watcherHandlers[label], ctx)
+//			fmt.Println("watcherHandlers.0: ", len(m.watcherHandlers[label]))
+//			if len(m.watcherHandlers[label]) > 0 {
+//				// next, ok := m.watcherHandlers[label]
+//				for nextCtx, _ := range m.watcherHandlers[label] {
+//					ctx = nextCtx
+//				}
+//				m.mu.Unlock()
+//				continue
+//			}
+//			m.mu.Unlock()
+//			return ctx.Err()
+//		}
+//	}
+//}
 
 func (m *ObjectStore[T, R]) Delete(ctx context.Context, params *LabelParams) error {
 	m.mu.Lock()
@@ -413,6 +693,31 @@ func (m *ObjectStore[T, R]) Context() context.Context {
 
 func (m *ObjectStore[T, R]) Close() {
 	m.cancel()
+
+	//closeCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	//defer cancel()
+	//
+	//m.mu.Lock()
+	//watchersToStop := make([]jetstream.KeyWatcher, 0, len(m.watchers))
+	//for key, w := range m.watchers {
+	//	if w != nil { // Only add non-nil watchers
+	//		watchersToStop = append(watchersToStop, w)
+	//	}
+	//	// Clear the map entry under the lock
+	//	m.watchers[key] = nil // Or use delete(m.watchers, key)
+	//}
+	//// Map is now empty
+	//m.mu.Unlock()
+	//
+	//for _, w := range watchersToStop {
+	//	// We lost the key here by only storing the watcher.
+	//	// If logging the key is important, store struct{ key string; watcher jetstream.KeyWatcher } in step 3.
+	//	// For now, improve the generic message slightly.
+	//	if err := w.Stop(); err != nil {
+	//		// Use closeCtx for the logger context
+	//		m.logger.Ctx(closeCtx).Sugar().Errorf("failed to stop a watcher during close: %v", err)
+	//	}
+	//}
 }
 
 func (m *ObjectStore[T, R]) getLabelMutex(label string) *labelMutex {
@@ -475,7 +780,14 @@ func (m *ObjectStore[T, R]) getNewValue(ctx context.Context, label string, value
 	var object T = m.objectFactory()
 	err = object.UnmarshalVT(entryValue)
 	if err != nil {
-		return nil, 0, fmt.Errorf("failed to unmarshal objects state: %w", err)
+		obj := &proto.BaseMetric{}
+		baseMetricErr := obj.UnmarshalVT(entryValue)
+		if baseMetricErr != nil {
+			fmt.Printf("baseMetricErr: %s, %w\n", label, baseMetricErr)
+		} else {
+			fmt.Printf("it is BaseMetric:%s, %+v\n", label, obj)
+		}
+		return nil, 0, fmt.Errorf("failed to unmarshal object key: [%s]; type: [%T]; len [%d] state: %w", label, object, len(entryValue), err)
 	}
 
 	if err := object.Update(values); err != nil {
