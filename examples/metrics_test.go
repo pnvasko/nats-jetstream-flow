@@ -80,7 +80,7 @@ func BenchmarkMetrics(b *testing.B) {
 
 		watchCtx, watchCancel := context.WithCancel(mainCtx)
 		go func() {
-			err = m.Watch(watchCtx, &coordination.LabelParams{Label: "board.*"}, func(metric *models.BaseMetric) {
+			err = m.Watch(watchCtx, &coordination.LabelParams{Label: "board.*"}, func(label string, metric *models.BaseMetric) {
 				// fmt.Printf("board: %+v\n", metric)
 				_ = metric
 			})
@@ -284,7 +284,7 @@ func TestMetrics(t *testing.T) {
 
 		go func() {
 			defer wg.Done()
-			err := store.Watch(watchCtx, &coordination.LabelParams{Label: watchLabel}, func(obj *models.BaseMetric) {
+			err := store.Watch(watchCtx, &coordination.LabelParams{Label: watchLabel}, func(label string, obj *models.BaseMetric) {
 				t.Logf("Watcher received update for %s: %+v", watchLabel, obj)
 				// We are casting to TestCounterObject here because the callback
 				// receives the specific type T, not the interface Object.
