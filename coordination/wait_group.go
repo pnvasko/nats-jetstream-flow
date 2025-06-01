@@ -174,13 +174,15 @@ func (w *WaitGroup) Wait(ctx context.Context, groupId string) error {
 	}
 
 	var watcher jetstream.KeyWatcher
-
 	defer func() {
 		if watcher != nil {
 			if err := watcher.Stop(); err != nil { // Best effort stop
-				w.logger.Ctx(context.Background()).Sugar().Errorf("failed to stop WaitGroup watcher: %s", err.Error())
+				logCtx := w.Context()
+				if logCtx == nil || logCtx.Err() != nil {
+					logCtx = context.Background()
+				}
+				w.logger.Ctx(logCtx).Sugar().Errorf("failed to stop WaitGroup watcher: %s", err.Error())
 			}
-			watcher = nil
 		}
 	}()
 
