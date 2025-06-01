@@ -154,7 +154,6 @@ func TestWatchMetrics(t *testing.T) {
 				t.Logf("metrics_collection.Watch.01: %s %+v\n", label, obj)
 			})
 			require.NoError(t, err)
-			t.Logf("Watch.board.end.01")
 		}()
 
 		go func() {
@@ -168,7 +167,6 @@ func TestWatchMetrics(t *testing.T) {
 			if err != nil {
 				t.Logf("metrics_collection.Watch.02 error: %+v\n", err)
 			}
-			t.Logf("Watch.board.end.02")
 		}()
 
 		go func() {
@@ -178,14 +176,12 @@ func TestWatchMetrics(t *testing.T) {
 				t.Logf("metrics_collection.Watch %s; %+v\n", label, obj)
 			})
 			require.NoError(t, err)
-			t.Logf("Watch.client.end")
 		}()
 
 		var wg sync.WaitGroup
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			t.Logf("ScatterGatherSearchMetrics.start")
 			search := &proto.Search{
 				Id:        1,
 				ClientId:  2,
@@ -200,7 +196,6 @@ func TestWatchMetrics(t *testing.T) {
 				require.NoError(t, err)
 				time.Sleep(500 * time.Millisecond)
 			}
-			t.Logf("ScatterGatherSearchMetrics.end")
 		}()
 
 		wg.Wait()

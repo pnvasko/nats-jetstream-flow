@@ -24,7 +24,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 )
 
@@ -53,41 +52,6 @@ const (
 	defaultWorkflowMetricsBucketName = "metrics"
 	defaultWorkflowMetricsScope      = "workflow.metrics"
 )
-
-var totalSearchesSend int32 = 0
-var totalSearchesPull int32 = 0
-
-type FlowCounter struct {
-}
-
-func NewFlowCounter() *FlowCounter {
-	return &FlowCounter{}
-}
-
-func (f FlowCounter) Get(ctx context.Context, params *coordination.LabelParams) (any, error) {
-	return nil, nil
-}
-
-func (f FlowCounter) FullUpdate(ctx context.Context, params *coordination.LabelParams, vs any) error {
-
-	return nil
-}
-
-func (f FlowCounter) Incr(ctx context.Context, params *coordination.LabelParams, i uint64) error {
-	return nil
-}
-
-func (f FlowCounter) Decr(ctx context.Context, params *coordination.LabelParams, i uint64) error {
-	return nil
-}
-
-func (f FlowCounter) Failed(ctx context.Context, params *coordination.LabelParams, i uint64) error {
-	return nil
-}
-
-func (f FlowCounter) Delete(ctx context.Context, params *coordination.LabelParams) error {
-	return nil
-}
 
 type serviceContext struct {
 	ctx          context.Context
@@ -471,7 +435,7 @@ var serveWorkerFlow = &cli.Command{
 							sc.logger.Ctx(sc.ctx).Sugar().Debugf("workerSink get stream message subject failed, not suuport message type: %T", msg)
 							continue
 						}
-						atomic.AddInt32(&totalSearchesPull, 1)
+
 						if ok := msg.Ack(); ok {
 							fmt.Printf("workerSink. ack stream message success subject: %s\n", subject)
 							sc.logger.Ctx(sc.ctx).Sugar().Debugf("workerSink. ack stream message success subject: %s", subject)
@@ -532,10 +496,10 @@ var serveScatterGatherFlow = &cli.Command{
 		metricsScope := defaultWorkflowMetricsScope
 
 		// todo debug
-		err = sc.js.DeleteKeyValue(sc.ctx, metricsBucketName)
-		if err != nil {
-			return err
-		}
+		// err = sc.js.DeleteKeyValue(sc.ctx, metricsBucketName)
+		// if err != nil {
+		//	return err
+		// }
 
 		var metricsOpts []handlers.MetricsCollectorOption
 		metricsOpts = append(metricsOpts, handlers.WithCleanupTTL(64*time.Hour))
@@ -612,10 +576,6 @@ var serveScatterGatherFlow = &cli.Command{
 			return err
 		}
 
-		//counter, err := coordination.NewCounterGaugeStore(sc.ctx, sc.js, sc.tracer, sc.logger)
-		//if err != nil {
-		//	return err
-		//}
 		sinkHandlers, err := handlers.NewSinkHandlers[*stream.Message](sc.ctx, sc.js, mc, sc.tracer, sc.logger)
 		if err != nil {
 			return err
@@ -784,11 +744,6 @@ func (cdc *CdcSource) Run() error {
 	ctxRun, runSpan := cdc.tracer.Start(cdc.ctx, "cdcSource.run")
 	defer runSpan.End()
 
-	//cg, err := coordination.NewCounterGaugeStore(cdc.ctx, cdc.js, cdc.tracer, cdc.logger)
-	//if err != nil {
-	//	return err
-	//}
-
 	allBoards := []string{"amazon", "ebay", "walmart", "shopify", "alibaba", "wish"}
 
 	rng := rand.New(rand.NewSource(time.Now().UnixNano()))
@@ -879,22 +834,10 @@ func (cdc *CdcSource) Run() error {
 					errCh <- stream.SetLogError(cdcSpanCtx, "publish message failed", err, cdc.logger)
 					return
 				}
-				// fmt.Printf("cdc source ticker search_id: %d; msg_id %s: boards %s\n", id, msgId, strings.Join(s.Boards, ","))
+
 				attrs = append(attrs, attribute.String("msg_id", msgId))
 				attrs = append(attrs, attribute.String("msg_board", strings.Join(s.Boards, ",")))
 				fmt.Printf("cdc source ticker search_id: %d; msg_id %s: len boards %d\n", id, msgId, len(s.Boards))
-				atomic.AddInt32(&totalSearchesSend, int32(len(s.Boards)))
-				//if err := cg.Update(cdcSpanCtx, handlers.LabelSearchNew, 1); err != nil {
-				//	cdc.logger.Ctx(ctxRun).Sugar().Errorf("cdc source failed incr search new counter: %d; msg_id %s: boards %s", id, msgId, strings.Join(s.Boards, ","))
-				//	//errCh <- stream.SetLogError(cdcSpanCtx, "increment counter failed", err, cdc.logger)
-				//	//return
-				//}
-				//
-				//if err := cg.Update(cdcSpanCtx, handlers.LabelSearchBoard, int64(len(s.Boards))); err != nil {
-				//	cdc.logger.Ctx(ctxRun).Sugar().Errorf("cdc source failed incr search board counter: %d; msg_id %s: boards %s", id, msgId, strings.Join(s.Boards, ","))
-				//	//errCh <- stream.SetLogError(cdcSpanCtx, "increment counter failed", err, cdc.logger)
-				//	//return
-				//}
 
 				id++
 				if id > totalSearch {
