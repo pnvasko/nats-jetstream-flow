@@ -133,7 +133,7 @@ func TestWatchMetrics(t *testing.T) {
 			metricsOpts...,
 		)
 		require.NoError(t, err)
-		err = mc.InitMetric()
+		err = mc.InitSearchMetrics()
 		require.NoError(t, err)
 
 		time.Sleep(100 * time.Millisecond)

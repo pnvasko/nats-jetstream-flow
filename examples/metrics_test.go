@@ -545,7 +545,7 @@ func TestMetrics(t *testing.T) {
 			mc.Close(mainCtx)
 		}()
 
-		err = mc.InitMetric()
+		err = mc.InitSearchMetrics()
 		require.NoError(t, err)
 
 		//err = mc.AddMetric(handlers.GetMetricRecordName(handlers.UserType), handlers.NewMetricHandler(handlers.MapStore, func(labelBuilder *strings.Builder, params handlers.WorkflowLabelParams) error {

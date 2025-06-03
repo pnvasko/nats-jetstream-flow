@@ -359,7 +359,7 @@ func NewMetricsCollector(ctx context.Context,
 	return mc, nil
 }
 
-func (mc *MetricsCollector) InitMetric() error {
+func (mc *MetricsCollector) InitSearchMetrics() error {
 	if err := mc.AddMetric(GetMetricRecordName(UserType), NewMetricHandler(MapStore, func(labelBuilder *strings.Builder, params WorkflowLabelParams) error {
 		if params.UserId == 0 {
 			return fmt.Errorf("invalid user id: %d", params.UserId)

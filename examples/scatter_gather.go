@@ -8,8 +8,8 @@ import (
 	"github.com/nats-io/nats.go/jetstream"
 	stream "github.com/pnvasko/nats-jetstream-flow"
 	"github.com/pnvasko/nats-jetstream-flow/common"
-	"github.com/pnvasko/nats-jetstream-flow/coordination"
 	"github.com/pnvasko/nats-jetstream-flow/examples/handlers"
+	"github.com/pnvasko/nats-jetstream-flow/examples/workers"
 	"github.com/pnvasko/nats-jetstream-flow/flow"
 	"github.com/pnvasko/nats-jetstream-flow/proto/v1"
 	"github.com/rs/xid"
@@ -19,7 +19,7 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
 	"go.uber.org/zap"
-	"math/rand"
+
 	"os"
 	"strconv"
 	"strings"
@@ -30,27 +30,12 @@ import (
 const (
 	totalSearch = 50
 	// Workflow Stream.
-	defaultWorkflowStreamName       = "workflow"
-	defaultWorkflowStreamSubjects   = "  distributor.>;  worker.>;collector.>"
-	defaultWorkflowStreamCleanupTtl = 3600 * time.Second
-
-	// Distributor activity.
-	defaultWorkflowSearchDistributorDurableName = "distributor_searches"
-
-	// CDC activity.
-	defaultSearchCDCSubject = "distributor.search.new"
 
 	// Worker activity
-	defaultWorkflowSearchWorkerDurableName = "worker_searches"
-	templateSearchWorkerSubject            = "worker.%s.search.new.%d"
-	defaultWorkflowWorkerSubjects          = "worker"
 
 	parentMsgIdKey      = "_parent_msg_id_key"
 	originalSearchIdKey = "_original_search_id_key"
 	originalBoardKey    = "_original_board_key"
-
-	defaultWorkflowMetricsBucketName = "metrics"
-	defaultWorkflowMetricsScope      = "workflow.metrics"
 )
 
 type serviceContext struct {
@@ -172,6 +157,7 @@ func main() {
 			serveCdcFlow,
 			serveScatterGatherFlow,
 			serveWorkerFlow,
+			serveSearchCollector,
 		},
 		Before: func(ctx *cli.Context) (err error) {
 			fmt.Println("before start service.")
@@ -185,11 +171,11 @@ func main() {
 				}
 			}()
 
-			streamSearchesName := defaultWorkflowStreamName
-			streamSearchesCleanupTtl := defaultWorkflowStreamCleanupTtl
+			streamSearchesName := workers.DefaultWorkflowStreamName
+			streamSearchesCleanupTtl := workers.DefaultWorkflowStreamCleanupTtl
 
 			var streamSearchesSubjects []string
-			for _, sub := range strings.Split(defaultWorkflowStreamSubjects, ";") {
+			for _, sub := range strings.Split(workers.DefaultWorkflowStreamSubjects, ";") {
 				sub = strings.Trim(sub, " ")
 				if strings.HasSuffix(sub, " ") || strings.HasPrefix(sub, " ") {
 					fmt.Printf("invalid subject: %s\n", sub)
@@ -197,7 +183,7 @@ func main() {
 				streamSearchesSubjects = append(streamSearchesSubjects, sub)
 			}
 			if len(streamSearchesSubjects) == 0 {
-				return fmt.Errorf("subjects list for stream [%s] is empty", defaultWorkflowStreamName)
+				return fmt.Errorf("subjects list for stream [%s] is empty", workers.DefaultWorkflowStreamName)
 			}
 
 			var streamOpts []stream.StreamConfigOption
@@ -278,7 +264,7 @@ var serveCdcFlow = &cli.Command{
 			}
 		}()
 
-		cdc, err := NewCdcEmitter(sc.ctx, sc.js, sc.tracer, sc.logger)
+		cdc, err := workers.NewCdcEmitter(sc.ctx, sc.js, sc.tracer, sc.logger)
 		if err != nil {
 			return err
 		}
@@ -328,72 +314,7 @@ var serveWorkerFlow = &cli.Command{
 			}
 		}()
 
-		metricsBucketName := defaultWorkflowMetricsBucketName
-		metricsScope := defaultWorkflowMetricsScope
-		var metricsOpts []handlers.MetricsCollectorOption
-		metricsOpts = append(metricsOpts, handlers.WithCleanupTTL(64*time.Hour))
-		mc, err := handlers.NewMetricsCollector(sc.ctx,
-			"worker",
-			metricsBucketName,
-			metricsScope,
-			func(labelBuilder *strings.Builder, params handlers.WorkflowLabelParams) error {
-				if params.Scope != "" {
-					labelBuilder.WriteString(params.Scope)
-					labelBuilder.WriteString(".")
-				}
-
-				return nil
-			},
-			sc.js,
-			sc.tracer,
-			sc.logger,
-			metricsOpts...,
-		)
-		if err != nil {
-			return err
-		}
-		defer mc.Close(sc.ctx)
-
-		go func() {
-			if err := mc.WatchMapStore(sc.ctx, &coordination.LabelParams{Label: "workflow.metrics.client.*"}, func(label string, obj any) {
-				fmt.Printf("metrics_collection.Watch :%s %+v\n", label, obj)
-			}); err != nil {
-				sc.logger.Ctx(sc.ctx).Error("watch metrics collection watch error", zap.Error(err))
-			}
-		}()
-
-		streamSearchesName := defaultWorkflowStreamName
-		streamSearchesCleanupTtl := defaultWorkflowStreamCleanupTtl
-		var streamSearchesSubjects []string
-		for _, sub := range strings.Split(defaultWorkflowStreamSubjects, ";") {
-			sub = strings.Trim(sub, " ")
-			if strings.HasSuffix(sub, " ") || strings.HasPrefix(sub, " ") {
-				fmt.Printf("invalid subject: %s\n", sub)
-			}
-			streamSearchesSubjects = append(streamSearchesSubjects, sub)
-		}
-		if len(streamSearchesSubjects) == 0 {
-			return fmt.Errorf("subjects list for stream [%s] is empty", defaultWorkflowStreamName)
-		}
-
-		var streamOpts []stream.StreamConfigOption
-		streamOpts = append(streamOpts, stream.WithCleanupTtl(streamSearchesCleanupTtl))
-
-		var streamWorkerSourceOpts []stream.StreamSourceConfigOption
-		var consumerWorkerOpts []stream.ConsumerConfigOption
-		consumerWorkerOpts = append(consumerWorkerOpts, stream.WithDurableName(defaultWorkflowSearchWorkerDurableName))
-		consumerWorkerOpts = append(consumerWorkerOpts, stream.WithFilterSubjects([]string{fmt.Sprintf("%s.>", defaultWorkflowWorkerSubjects)}))
-		streamWorkerSourceConfig, err := stream.NewJetStreamSourceConfig(sc.js, streamSearchesName, streamSearchesSubjects, streamOpts, consumerWorkerOpts, streamWorkerSourceOpts...)
-		if err != nil {
-			return err
-		}
-
-		streamWorkerSource, err := stream.NewStreamSource[*proto.Search](sc.ctx, "worker_search_source", sc.js, streamWorkerSourceConfig, sc.tracer, sc.logger)
-		if err != nil {
-			return err
-		}
-
-		sc.logger.Ctx(sc.ctx).Info("start worker flow...")
+		worker, err := workers.NewBatchSearch(sc.ctx, sc.js, sc.tracer, sc.logger)
 
 		runGroup, err := common.NewRunGroup(common.WithStopTimeout(10 * time.Second))
 		if err != nil {
@@ -401,72 +322,45 @@ var serveWorkerFlow = &cli.Command{
 		}
 
 		_ = runGroup.Add("WorkerSource", func() error {
-			sc.logger.Ctx(sc.ctx).Sugar().Debugf("started worker stream flow.")
-			if err := streamWorkerSource.Run(); err != nil {
-				return err
-			}
-
-			workerSink := flow.NewChanSink(sc.ctx)
-			err = workerSink.Run()
-			if err != nil {
-				return err
-			}
-
-			waitWorkerSinkOut := make(chan struct{})
-			go func() {
-				defer close(waitWorkerSinkOut)
-
-				for {
-					select {
-					case <-sc.ctx.Done():
-						return
-					case jsMsg, ok := <-workerSink.Out():
-						if !ok {
-							sc.logger.Ctx(sc.ctx).Sugar().Debugf("workerSink. worker sink closed")
-						}
-						msg, ok := jsMsg.(*stream.Message)
-						if !ok {
-							sc.logger.Ctx(sc.ctx).Sugar().Debugf("workerSink get stream message failed, not suuport message type: %T", msg)
-							return
-						}
-
-						subject, err := msg.Subject()
-						if err != nil {
-							sc.logger.Ctx(sc.ctx).Sugar().Debugf("workerSink get stream message subject failed, not suuport message type: %T", msg)
-							continue
-						}
-
-						if ok := msg.Ack(); ok {
-							fmt.Printf("workerSink. ack stream message success subject: %s\n", subject)
-							sc.logger.Ctx(sc.ctx).Sugar().Debugf("workerSink. ack stream message success subject: %s", subject)
-						} else {
-							sc.logger.Ctx(sc.ctx).Sugar().Errorf("workerSink. ack stream message failed subject: %s", subject)
-						}
-					}
-				}
-			}()
-
-			waitStreamWorkerFlow := make(chan struct{})
-			go func() {
-				defer func() {
-					close(waitStreamWorkerFlow)
-				}()
-
-				streamWorkerSource.
-					Via(flow.NewPassThrough()).
-					To(workerSink)
-			}()
-
-			select {
-			case <-waitWorkerSinkOut:
-				sc.logger.Ctx(sc.ctx).Sugar().Debugf("worker sink error, waitWorkerSinkOut closed")
-				return fmt.Errorf("worker sink error, worker sink out closed")
-			case <-waitStreamWorkerFlow:
-				sc.logger.Ctx(sc.ctx).Sugar().Debugf("worker sink error, waitStreamWorkerFlow closed")
-			}
-			return nil
+			return worker.Run()
 		}, func(err error) {
 			sc.logger.Ctx(c.Context).Sugar().Debugf("stream worker flow interrupt")
+		})
+
+		if err := runGroup.Run(sc.ctx); err != nil && !(errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)) {
+			sc.logger.Ctx(sc.ctx).Sugar().Errorf("run group error: %v", err)
+			return err
+		}
+
+		return nil
+	},
+}
+
+var serveSearchCollector = &cli.Command{
+	Name:  "serve-search-collector",
+	Usage: "serve-search-collector. run search collector flow...",
+	Action: func(c *cli.Context) error {
+		sc, err := initService(c.Context, "workflow.map_reduce.worker", "workflow_search_collector_worker", "worker_main")
+		if err != nil {
+			return err
+		}
+		defer func() {
+			if err := sc.Shutdown(); err != nil {
+				fmt.Printf("failed to shutdown service: %s\n", err.Error())
+			}
+		}()
+
+		collectorWorker, err := workers.NewSearchCollector(sc.ctx, sc.js, sc.tracer, sc.logger)
+
+		runGroup, err := common.NewRunGroup(common.WithStopTimeout(10 * time.Second))
+		if err != nil {
+			return err
+		}
+
+		_ = runGroup.Add("CollectorWorker", func() error {
+			return collectorWorker.Run()
+		}, func(err error) {
+			sc.logger.Ctx(c.Context).Sugar().Debugf("collector worker flow interrupt")
 		})
 
 		if err := runGroup.Run(sc.ctx); err != nil && !(errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)) {
@@ -492,8 +386,8 @@ var serveScatterGatherFlow = &cli.Command{
 			}
 		}()
 
-		metricsBucketName := defaultWorkflowMetricsBucketName
-		metricsScope := defaultWorkflowMetricsScope
+		metricsBucketName := workers.DefaultWorkflowMetricsBucketName
+		metricsScope := workers.DefaultWorkflowMetricsScope
 
 		// todo debug
 		// err = sc.js.DeleteKeyValue(sc.ctx, metricsBucketName)
@@ -525,13 +419,13 @@ var serveScatterGatherFlow = &cli.Command{
 		}
 		defer mc.Close(sc.ctx)
 
-		if err := mc.InitMetric(); err != nil {
+		if err := mc.InitSearchMetrics(); err != nil {
 			return err
 		}
 
-		streamSearchesName := defaultWorkflowStreamName
+		streamSearchesName := workers.DefaultWorkflowStreamName
 		var streamSearchesSubjects []string
-		for _, sub := range strings.Split(defaultWorkflowStreamSubjects, ";") {
+		for _, sub := range strings.Split(workers.DefaultWorkflowStreamSubjects, ";") {
 			sub = strings.Trim(sub, " ")
 			if strings.HasSuffix(sub, " ") || strings.HasPrefix(sub, " ") {
 				fmt.Printf("invalid subject: %s\n", sub)
@@ -539,11 +433,11 @@ var serveScatterGatherFlow = &cli.Command{
 			streamSearchesSubjects = append(streamSearchesSubjects, sub)
 		}
 		if len(streamSearchesSubjects) == 0 {
-			return fmt.Errorf("subjects list for stream [%s] is empty", defaultWorkflowStreamName)
+			return fmt.Errorf("subjects list for stream [%s] is empty", workers.DefaultWorkflowStreamName)
 		}
 
-		streamSearchesCleanupTtl := defaultWorkflowStreamCleanupTtl
-		streamSearchesDurableName := defaultWorkflowSearchDistributorDurableName
+		streamSearchesCleanupTtl := workers.DefaultWorkflowStreamCleanupTtl
+		streamSearchesDurableName := workers.DefaultWorkflowSearchDistributorDurableName
 
 		var streamOpts []stream.StreamConfigOption
 		streamOpts = append(streamOpts, stream.WithCleanupTtl(streamSearchesCleanupTtl))
@@ -555,7 +449,7 @@ var serveScatterGatherFlow = &cli.Command{
 		var streamSourceOpts []stream.StreamSourceConfigOption
 		var consumerOpts []stream.ConsumerConfigOption
 		consumerOpts = append(consumerOpts, stream.WithDurableName(streamSearchesDurableName))
-		consumerOpts = append(consumerOpts, stream.WithFilterSubjects([]string{fmt.Sprintf("%s.*", defaultSearchCDCSubject)}))
+		consumerOpts = append(consumerOpts, stream.WithFilterSubjects([]string{fmt.Sprintf("%s.*", workers.DefaultSearchCDCSubject)}))
 		streamSourceConfig, err := stream.NewJetStreamSourceConfig(sc.js, streamSearchesName, streamSearchesSubjects, streamOpts, consumerOpts, streamSourceOpts...)
 		if err != nil {
 			return err
@@ -565,11 +459,13 @@ var serveScatterGatherFlow = &cli.Command{
 			return err
 		}
 
+		// Todo debug
 		if err := streamSource.PurgeStream(); err != nil {
 			sc.logger.Ctx(sc.ctx).Sugar().Errorf("purge worker stream error: %v", err)
 		} else {
 			sc.logger.Ctx(sc.ctx).Sugar().Warnf("worker stream purged successfully.")
 		}
+		// Todo debug
 
 		sinkConfig, err := stream.NewStreamSinkConfig(streamConfig)
 		if err != nil {
@@ -627,7 +523,7 @@ var serveScatterGatherFlow = &cli.Command{
 					msg.SetMessageMetadata(handlers.DebugFailedKey, "false")
 				}
 
-				subject := fmt.Sprintf(templateSearchWorkerSubject, board, search.Id)
+				subject := fmt.Sprintf(workers.TemplateSearchWorkerSubject, board, search.Id)
 				msg.SetUuid(uuid)
 				msg.SetSubject(subject)
 				msg.SetContext(splitMapSpanCtx)
@@ -646,6 +542,9 @@ var serveScatterGatherFlow = &cli.Command{
 		if err != nil {
 			return err
 		}
+
+		// TODO collector
+		// collector
 
 		sc.logger.Ctx(sc.ctx).Info("start scatter gather flow...")
 
@@ -712,174 +611,3 @@ var serveScatterGatherFlow = &cli.Command{
 		return nil
 	},
 }
-
-type Worker interface {
-	Run() error
-	Close(ctx context.Context) error
-	Done() <-chan struct{}
-}
-
-type CdcSource struct {
-	ctx       context.Context
-	cancel    context.CancelFunc
-	closeOnce sync.Once
-	wg        common.SafeWaitGroup
-	js        jetstream.JetStream
-
-	tracer trace.Tracer
-	logger *common.Logger
-}
-
-func NewCdcEmitter(ctx context.Context, js jetstream.JetStream, tracer trace.Tracer, logger *common.Logger) (*CdcSource, error) {
-	cdc := &CdcSource{
-		js:     js,
-		tracer: tracer,
-		logger: logger,
-	}
-	cdc.ctx, cdc.cancel = context.WithCancel(ctx)
-	return cdc, nil
-}
-
-func (cdc *CdcSource) Run() error {
-	ctxRun, runSpan := cdc.tracer.Start(cdc.ctx, "cdcSource.run")
-	defer runSpan.End()
-
-	allBoards := []string{"amazon", "ebay", "walmart", "shopify", "alibaba", "wish"}
-
-	rng := rand.New(rand.NewSource(time.Now().UnixNano()))
-
-	randomElement := func(slice []string) string {
-		if len(slice) == 0 {
-			return ""
-		}
-		return slice[rng.Intn(len(slice))]
-	}
-
-	countTicker := time.NewTicker(5 * 60 * time.Second)
-	defer countTicker.Stop()
-	ticker := time.NewTicker(50 * time.Millisecond)
-	defer ticker.Stop()
-
-	i := 1
-	var id int32 = 1
-	for {
-		select {
-		case <-ctxRun.Done():
-			return ctxRun.Err()
-		case <-countTicker.C:
-			fmt.Printf("cdc source ticker %d run %d\n", i, id)
-			i++
-		case <-ticker.C:
-			complete := make(chan struct{})
-			errCh := make(chan error)
-			go func() {
-				cdc.logger.Ctx(ctxRun).Sugar().Debugf("cdc source ticker run %d", id)
-				cdcSpanCtx, cdcSpan := cdc.tracer.Start(context.Background(), fmt.Sprintf("cdc.message.producer"))
-				var attrs []attribute.KeyValue
-				defer func() {
-					cdcSpan.SetAttributes(attrs...)
-					cdcSpan.End()
-				}()
-
-				s := proto.Search{
-					Id:       id,
-					UserId:   1,
-					ClientId: 1,
-					Boards:   []string{},
-				}
-				totalBoards := rng.Intn(len(allBoards))
-				if totalBoards == 0 {
-					totalBoards = 1
-				}
-				boards := map[string]struct{}{}
-
-				i := 0
-				for {
-					if i >= totalBoards {
-						break
-					}
-					board := randomElement(allBoards)
-					if _, ok := boards[board]; ok {
-						continue
-					}
-					boards[board] = struct{}{}
-					s.Boards = append(s.Boards, board)
-					i++
-				}
-
-				data, err := s.MarshalVT()
-				if err != nil {
-					errCh <- stream.SetLogError(cdcSpanCtx, "marshal message failed", err, cdc.logger)
-					return
-				}
-				msgId := xid.New().String()
-				msg, err := stream.NewMessage(msgId, data)
-				if err != nil {
-					errCh <- stream.SetLogError(cdcSpanCtx, "create new stream message failed", err, cdc.logger)
-					return
-				}
-				msg.SetSubject(fmt.Sprintf("%s.%d", defaultSearchCDCSubject, id))
-				msg.SetContext(cdcSpanCtx)
-				if len(boards) >= 3 {
-					msg.SetMessageMetadata(handlers.DebugFailedKey, "true")
-				}
-				msgData, err := stream.NewNatsMessage(msg)
-				if err != nil {
-					errCh <- stream.SetLogError(cdcSpanCtx, "create new nats message failed", err, cdc.logger)
-					return
-
-				}
-				_, err = cdc.js.PublishMsgAsync(msgData)
-				if err != nil {
-					errCh <- stream.SetLogError(cdcSpanCtx, "publish message failed", err, cdc.logger)
-					return
-				}
-
-				attrs = append(attrs, attribute.String("msg_id", msgId))
-				attrs = append(attrs, attribute.String("msg_board", strings.Join(s.Boards, ",")))
-				fmt.Printf("cdc source ticker search_id: %d; msg_id %s: len boards %d\n", id, msgId, len(s.Boards))
-
-				id++
-				if id > totalSearch {
-					errCh <- nil
-				}
-				close(complete)
-			}()
-
-			select {
-			case <-ctxRun.Done():
-				return ctxRun.Err()
-			case err := <-errCh:
-				ticker.Stop()
-				time.Sleep(5000 * time.Millisecond)
-				return err
-			case <-complete:
-
-				continue
-			}
-		}
-	}
-}
-
-func (cdc *CdcSource) Close(ctx context.Context) error {
-	waitChan := make(chan struct{})
-	go func() {
-		cdc.wg.Wait()
-		close(waitChan)
-	}()
-
-	select {
-	case <-ctx.Done():
-		cdc.closeOnce.Do(func() { cdc.cancel() })
-		return ctx.Err()
-	case <-waitChan:
-		cdc.closeOnce.Do(func() { cdc.cancel() })
-		return nil
-	}
-}
-
-func (cdc *CdcSource) Done() <-chan struct{} {
-	return cdc.ctx.Done()
-}
-
-var _ Worker = (*CdcSource)(nil)
