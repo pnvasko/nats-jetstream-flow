@@ -49,7 +49,7 @@ func (m *labelMutex) Unlock() {
 	m.mu.Unlock()
 }
 
-type ObjectStore[T Object, R any] struct {
+type ObjectStore[T Object, UpdateInput any] struct {
 	*baseKvStore
 	ctx    context.Context
 	cancel context.CancelFunc
