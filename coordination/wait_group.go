@@ -31,10 +31,10 @@ type WaitGroup struct {
 	// jetstream.Stream
 
 	tracer trace.Tracer
-	logger *common.Logger
+	logger common.Logger
 }
 
-func NewWaitGroup(ctx context.Context, js jetstream.JetStream, tracer trace.Tracer, logger *common.Logger, opts ...StoreOption[*WaitGroup]) (*WaitGroup, error) {
+func NewWaitGroup(ctx context.Context, js jetstream.JetStream, tracer trace.Tracer, logger common.Logger, opts ...StoreOption[*WaitGroup]) (*WaitGroup, error) {
 	w := &WaitGroup{
 		baseKvStore: &baseKvStore{
 			scope: defaultWaitGroupScope,

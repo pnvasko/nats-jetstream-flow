@@ -75,14 +75,14 @@ type ObjectStore[T Object, UpdateInput any] struct {
 	spanNameReset  string
 
 	tracer trace.Tracer
-	logger *common.Logger
+	logger common.Logger
 }
 
 func NewObjectStore[T Object, UpdateInput any](ctx context.Context,
 	js jetstream.JetStream,
 	factory func() T,
 	tracer trace.Tracer,
-	logger *common.Logger,
+	logger common.Logger,
 	opts ...StoreOption[*ObjectStore[T, UpdateInput]],
 ) (*ObjectStore[T, UpdateInput], error) {
 	object := factory()

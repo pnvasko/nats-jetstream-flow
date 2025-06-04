@@ -50,10 +50,10 @@ type Map[T, R any] struct {
 	awaitCompletion time.Duration
 
 	tracer trace.Tracer
-	logger *common.Logger
+	logger common.Logger
 }
 
-func NewMap[T, R any](baseCtx context.Context, mapFunction MapFunction[T, R], poolSizePerPool int, tracer trace.Tracer, logger *common.Logger, opts ...MapOption[T, R]) (*Map[T, R], error) {
+func NewMap[T, R any](baseCtx context.Context, mapFunction MapFunction[T, R], poolSizePerPool int, tracer trace.Tracer, logger common.Logger, opts ...MapOption[T, R]) (*Map[T, R], error) {
 	var err error
 
 	m := &Map[T, R]{
@@ -143,7 +143,7 @@ func (m *Map[T, R]) transmit(in Input) {
 func (m *Map[T, R]) process(ctx context.Context) {
 	defer func() {
 		if r := recover(); r != nil {
-			m.logger.Sugar().Errorf("Map function panic %v:", r)
+			m.logger.Ctx(ctx).Sugar().Errorf("Map function panic %v:", r)
 		}
 		m.wg.Wait()
 		close(m.out)

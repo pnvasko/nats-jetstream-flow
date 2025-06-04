@@ -23,10 +23,10 @@ type SearchCollector struct {
 	js jetstream.JetStream
 
 	tracer trace.Tracer
-	logger *common.Logger
+	logger common.Logger
 }
 
-func NewSearchCollector(ctx context.Context, js jetstream.JetStream, tracer trace.Tracer, logger *common.Logger) (*SearchCollector, error) {
+func NewSearchCollector(ctx context.Context, js jetstream.JetStream, tracer trace.Tracer, logger common.Logger) (*SearchCollector, error) {
 	c := &SearchCollector{
 		js:     js,
 		tracer: tracer,

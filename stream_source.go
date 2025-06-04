@@ -160,7 +160,7 @@ type StreamSource[T flow.MessageData] struct {
 
 	out    chan any
 	tracer trace.Tracer
-	logger *common.Logger
+	logger common.Logger
 }
 
 type streamSourceJob struct {
@@ -174,7 +174,7 @@ func NewStreamSource[T flow.MessageData](ctx context.Context,
 	js jetstream.JetStream,
 	config *StreamSourceConfig,
 	tracer trace.Tracer,
-	logger *common.Logger,
+	logger common.Logger,
 ) (*StreamSource[T], error) {
 	var err error
 	ss := &StreamSource[T]{

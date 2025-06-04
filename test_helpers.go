@@ -29,13 +29,13 @@ func (ap *AnyTestPayload) UnmarshalVT(data []byte) error {
 
 var _ flow.MessageData = (*AnyTestPayload)(nil)
 
-func getJS(t *testing.T) (context.Context, *common.Logger, *nats.Conn, jetstream.JetStream, error) {
+func getJS(t *testing.T) (context.Context, common.Logger, *nats.Conn, jetstream.JetStream, error) {
 	ctx := context.Background()
 	logConfig, err := common.NewDevOtlpConfig()
 	if err != nil {
 		return nil, nil, nil, nil, err
 	}
-	logger, err := common.NewLogger(logConfig)
+	logger, err := common.NewLibLogger(logConfig)
 	if err != nil {
 		return nil, nil, nil, nil, err
 	}
@@ -56,7 +56,7 @@ func setupStreamSource[T flow.MessageData](t *testing.T,
 	streamName string,
 	subjects []string,
 	tracer trace.Tracer,
-	logger *common.Logger,
+	logger common.Logger,
 	streamOpts StreamConfigOptions,
 	consumerOpts ConsumerConfigOptions,
 	opts ...StreamSourceConfigOption,

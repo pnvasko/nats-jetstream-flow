@@ -70,7 +70,7 @@ func NewBaseMetricStore(ctx context.Context,
 	name string,
 	labelFactory func(any) (string, error),
 	tracer trace.Tracer,
-	logger *common.Logger,
+	logger common.Logger,
 	opts BaseMetricStoreOption,
 ) (*BaseMetricStore, error) {
 	m, err := coordination.NewObjectStore[*BaseMetric, *BaseMetricInput](ctx, js, NewBaseMetricFactory(name, labelFactory), tracer, logger, opts...)

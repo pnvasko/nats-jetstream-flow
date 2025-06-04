@@ -20,10 +20,10 @@ type SinkHandlers[T any] struct {
 	mc *MetricsCollector
 
 	tracer trace.Tracer
-	logger *common.Logger
+	logger common.Logger
 }
 
-func NewSinkHandlers[T any](ctx context.Context, js jetstream.JetStream, mc *MetricsCollector, tracer trace.Tracer, logger *common.Logger) (*SinkHandlers[T], error) {
+func NewSinkHandlers[T any](ctx context.Context, js jetstream.JetStream, mc *MetricsCollector, tracer trace.Tracer, logger common.Logger) (*SinkHandlers[T], error) {
 	sh := &SinkHandlers[T]{
 		ctx:    ctx,
 		js:     js,

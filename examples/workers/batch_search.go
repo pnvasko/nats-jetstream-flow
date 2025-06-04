@@ -22,10 +22,10 @@ type BatchSearch struct {
 	js jetstream.JetStream
 
 	tracer trace.Tracer
-	logger *common.Logger
+	logger common.Logger
 }
 
-func NewBatchSearch(ctx context.Context, js jetstream.JetStream, tracer trace.Tracer, logger *common.Logger) (*BatchSearch, error) {
+func NewBatchSearch(ctx context.Context, js jetstream.JetStream, tracer trace.Tracer, logger common.Logger) (*BatchSearch, error) {
 	bs := &BatchSearch{
 		js:     js,
 		tracer: tracer,

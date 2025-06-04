@@ -37,7 +37,7 @@ func NewMapMetricStore(ctx context.Context,
 	name string,
 	labelFactory func(any) (string, error),
 	tracer trace.Tracer,
-	logger *common.Logger,
+	logger common.Logger,
 	opts MapMetricStoreOption,
 ) (*MapMetricStore, error) {
 	m, err := coordination.NewObjectStore[*MapMetric, *MapMetricInput](ctx, js, NewMapMetricFactory(name, labelFactory), tracer, logger, opts...)

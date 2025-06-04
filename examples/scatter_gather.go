@@ -46,7 +46,7 @@ type serviceContext struct {
 	js           jetstream.JetStream
 	span         trace.Span
 	tracer       trace.Tracer
-	logger       *common.Logger
+	logger       common.Logger
 }
 
 func initService(ctx context.Context, tracerName, serviceName, mainSpanName string, opts ...trace.SpanStartOption) (*serviceContext, error) {
@@ -60,7 +60,7 @@ func initService(ctx context.Context, tracerName, serviceName, mainSpanName stri
 		return nil, err
 	}
 
-	sc.logger, err = common.NewLogger(otlpCfg)
+	sc.logger, err = common.NewLibLogger(otlpCfg)
 	if err != nil {
 		return nil, err
 	}

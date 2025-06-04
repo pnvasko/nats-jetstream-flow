@@ -58,7 +58,7 @@ var serveMapReducesFlow = &cli.Command{
 		if err := common.InitOpentelemetry(otlpCfg); err != nil {
 			return err
 		}
-		logger, err := common.NewLogger(otlpCfg)
+		logger, err := common.NewLibLogger(otlpCfg)
 		if err != nil {
 			return err
 		}
@@ -221,10 +221,10 @@ type Mapper struct {
 	js jetstream.JetStream
 
 	tracer trace.Tracer
-	logger *common.Logger
+	logger common.Logger
 }
 
-func NewMapper(ctx context.Context, js jetstream.JetStream, tracer trace.Tracer, logger *common.Logger) (*Mapper, error) {
+func NewMapper(ctx context.Context, js jetstream.JetStream, tracer trace.Tracer, logger common.Logger) (*Mapper, error) {
 	m := &Mapper{
 		js:     js,
 		tracer: tracer,
@@ -273,10 +273,10 @@ type Reducer struct {
 	js       jetstream.JetStream
 	consumer jetstream.Consumer
 	tracer   trace.Tracer
-	logger   *common.Logger
+	logger   common.Logger
 }
 
-func NewReducer(ctx context.Context, js jetstream.JetStream, streamName string, subjects []string, tracer trace.Tracer, logger *common.Logger) (*Reducer, error) {
+func NewReducer(ctx context.Context, js jetstream.JetStream, streamName string, subjects []string, tracer trace.Tracer, logger common.Logger) (*Reducer, error) {
 	r := &Reducer{
 		js:         js,
 		streamName: streamName,
@@ -345,10 +345,10 @@ type Aggregator struct {
 
 	js     jetstream.JetStream
 	tracer trace.Tracer
-	logger *common.Logger
+	logger common.Logger
 }
 
-func NewAggregator(ctx context.Context, js jetstream.JetStream, tracer trace.Tracer, logger *common.Logger) (*Aggregator, error) {
+func NewAggregator(ctx context.Context, js jetstream.JetStream, tracer trace.Tracer, logger common.Logger) (*Aggregator, error) {
 	a := &Aggregator{
 		js:     js,
 		tracer: tracer,

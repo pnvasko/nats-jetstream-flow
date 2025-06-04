@@ -25,10 +25,10 @@ type CdcSource struct {
 	js        jetstream.JetStream
 
 	tracer trace.Tracer
-	logger *common.Logger
+	logger common.Logger
 }
 
-func NewCdcEmitter(ctx context.Context, js jetstream.JetStream, tracer trace.Tracer, logger *common.Logger) (*CdcSource, error) {
+func NewCdcEmitter(ctx context.Context, js jetstream.JetStream, tracer trace.Tracer, logger common.Logger) (*CdcSource, error) {
 	cdc := &CdcSource{
 		js:     js,
 		tracer: tracer,

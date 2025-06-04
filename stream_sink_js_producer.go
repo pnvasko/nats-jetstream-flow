@@ -99,7 +99,7 @@ type StreamSinkProducer[T flow.Message] struct {
 	consumeHandler  SinkConsumeFunction[T]
 	completeHandler SinkCompleteFunction[T]
 	tracer          trace.Tracer
-	logger          *common.Logger
+	logger          common.Logger
 }
 
 func NewStreamSinkProducer[T flow.Message](ctx context.Context,
@@ -109,7 +109,7 @@ func NewStreamSinkProducer[T flow.Message](ctx context.Context,
 	completeHandler SinkCompleteFunction[T],
 	config *StreamSinkConfig,
 	tracer trace.Tracer,
-	logger *common.Logger,
+	logger common.Logger,
 ) (*StreamSinkProducer[T], error) {
 	var err error
 	ss := &StreamSinkProducer[T]{

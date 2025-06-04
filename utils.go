@@ -11,7 +11,7 @@ import (
 	"strconv"
 )
 
-func SetLogError(ctx context.Context, description string, err error, logger *common.Logger, attrs ...attribute.KeyValue) error {
+func SetLogError(ctx context.Context, description string, err error, logger common.Logger, attrs ...attribute.KeyValue) error {
 	recordError := fmt.Errorf("%s: %s", description, err.Error())
 	logger.Ctx(ctx).Error(description, zap.Error(err))
 	span := trace.SpanFromContext(ctx)

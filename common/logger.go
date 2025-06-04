@@ -10,23 +10,27 @@ import (
 	"os"
 )
 
-type Logger struct {
+type Logger interface {
+	Ctx(context.Context) otelzap.LoggerWithCtx
+}
+
+type LibLogger struct {
 	*otelzap.Logger
 }
 
-func (log *Logger) Ctx(ctx context.Context) otelzap.LoggerWithCtx {
+func (log *LibLogger) Ctx(ctx context.Context) otelzap.LoggerWithCtx {
 	return log.Logger.Ctx(ctx)
 }
 
-func (log *Logger) OtelZapLogger() *otelzap.Logger {
+func (log *LibLogger) OtelZapLogger() *otelzap.Logger {
 	return log.Logger
 }
 
-func (log *Logger) ZapLogger() *zap.Logger {
+func (log *LibLogger) ZapLogger() *zap.Logger {
 	return log.Logger.Logger
 }
 
-func NewLoggerWithParams(dsn, serviceName, environment, version, key string, debug bool) (*Logger, error) {
+func NewLoggerWithParams(dsn, serviceName, environment, version, key string, debug bool) (*LibLogger, error) {
 	cfg := DevOtlpConfig{
 		debug:       true,
 		dsn:         dsn,
@@ -35,10 +39,10 @@ func NewLoggerWithParams(dsn, serviceName, environment, version, key string, deb
 		version:     version,
 		key:         key,
 	}
-	return NewLogger(&cfg)
+	return NewLibLogger(&cfg)
 }
 
-func NewLogger(cfg OtlpConfig) (*Logger, error) {
+func NewLibLogger(cfg OtlpConfig) (*LibLogger, error) {
 	zapConf := zap.NewProductionEncoderConfig()
 	zapConf.EncodeTime = zapcore.ISO8601TimeEncoder
 
@@ -63,7 +67,7 @@ func NewLogger(cfg OtlpConfig) (*Logger, error) {
 	var options []otelzap.Option
 	options = append(options, otelzap.WithMinLevel(defaultLogLevel))
 
-	logger := &Logger{
+	logger := &LibLogger{
 		Logger: otelzap.New(zapLogger, options...),
 	}
 	zap.ReplaceGlobals(logger.ZapLogger())

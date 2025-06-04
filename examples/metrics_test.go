@@ -900,7 +900,7 @@ type TestContext struct {
 	nc     *nats.Conn
 	js     jetstream.JetStream
 	tracer trace.Tracer
-	logger *common.Logger
+	logger common.Logger
 }
 
 // func getTestContext(b *testing.B) (*TestContext, error) {
@@ -914,7 +914,7 @@ func getTestContext(t testingBT) (*TestContext, error) {
 		return nil, err
 	}
 
-	logger, err := common.NewLogger(logConfig)
+	logger, err := common.NewLibLogger(logConfig)
 	if err != nil {
 		cancel()
 		return nil, err

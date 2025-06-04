@@ -285,7 +285,7 @@ type MetricsCollector struct {
 	maxRetryAttempts *int
 
 	tracer trace.Tracer
-	logger *common.Logger
+	logger common.Logger
 }
 
 func NewMetricsCollector(ctx context.Context,
@@ -293,7 +293,7 @@ func NewMetricsCollector(ctx context.Context,
 	handler func(*strings.Builder, WorkflowLabelParams) error,
 	js jetstream.JetStream,
 	tracer trace.Tracer,
-	logger *common.Logger,
+	logger common.Logger,
 	opts ...MetricsCollectorOption,
 ) (*MetricsCollector, error) {
 	var err error
