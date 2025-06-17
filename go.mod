@@ -4,7 +4,6 @@ go 1.24.2
 
 require (
 	github.com/go-logr/zapr v1.3.0
-	github.com/golang/protobuf v1.5.4
 	github.com/nats-io/nats.go v1.42.0
 	github.com/panjf2000/ants/v2 v2.11.3
 	github.com/planetscale/vtprotobuf v0.6.1-0.20240319094008-0393e58bdf10

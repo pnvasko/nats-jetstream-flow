@@ -2,15 +2,14 @@ package nats_jetstream_flow
 
 import (
 	"context"
-	"github.com/golang/protobuf/ptypes/wrappers"
 	"github.com/pnvasko/nats-jetstream-flow/flow"
-	"testing"
-	"time"
-
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/anypb"
+	"google.golang.org/protobuf/types/known/wrapperspb"
+	"testing"
+	"time"
 )
 
 // Helper to create a basic message for tests
@@ -393,7 +392,7 @@ func TestMessageStreamMessage(t *testing.T) {
 	assert.Equal(t, msg.Uuid(), streamMsg.Uuid)
 
 	anyValue := &anypb.Any{}
-	bytesValue := &wrappers.BytesValue{
+	bytesValue := &wrapperspb.BytesValue{
 		Value: msg.Payload(),
 	}
 	err = anypb.MarshalFrom(anyValue, bytesValue, proto.MarshalOptions{})

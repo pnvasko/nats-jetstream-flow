@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"errors"
-	"github.com/golang/protobuf/ptypes/wrappers"
 	"github.com/nats-io/nats.go"
 	"github.com/pnvasko/nats-jetstream-flow/flow"
 	streamProto "github.com/pnvasko/nats-jetstream-flow/proto/v1"
@@ -13,6 +12,7 @@ import (
 	"go.opentelemetry.io/otel/trace"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/anypb"
+	"google.golang.org/protobuf/types/known/wrapperspb"
 	"sync"
 )
 
@@ -107,7 +107,7 @@ func (m *Message) Marshal() ([]byte, error) {
 
 	// old
 	anyValue := &anypb.Any{}
-	bytesValue := &wrappers.BytesValue{
+	bytesValue := &wrapperspb.BytesValue{
 		Value: m.payload,
 	}
 
@@ -138,7 +138,7 @@ func (m *Message) Unmarshal(rawData []byte) error {
 		m.metadata[k] = v
 	}
 
-	payloadBytesValue := &wrappers.BytesValue{}
+	payloadBytesValue := &wrapperspb.BytesValue{}
 	if err := anypb.UnmarshalTo(sm.Payload, payloadBytesValue, proto.UnmarshalOptions{}); err != nil {
 		return err
 	}
@@ -338,7 +338,7 @@ func (m *Message) Copy() (*Message, error) {
 
 func (m *Message) StreamMessage() (*streamProto.Message, error) {
 	anyValue := &anypb.Any{}
-	bytesValue := &wrappers.BytesValue{
+	bytesValue := &wrapperspb.BytesValue{
 		Value: m.payload,
 	}
 
