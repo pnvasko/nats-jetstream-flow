@@ -20,6 +20,10 @@ type Flow interface {
 	To(Sink)
 }
 
+type Outlet interface {
+	Out() <-chan any
+}
+
 type Source interface {
 	Output
 	Name() string
@@ -35,12 +39,4 @@ type Sink interface {
 	Run() error
 	RunCtx(context.Context) error
 	AwaitCompletion(time.Duration) error
-}
-
-func DoStream(out Output, in Input) {
-	go func() {
-		for element := range out.Out() {
-			in.In() <- element
-		}
-	}()
 }
