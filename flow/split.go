@@ -1,6 +1,20 @@
 package flow
 
-func Split[T any](outlet Outlet, predicate func(T) bool) [2]Flow {
+func Split[T any](outlet Outlet, predicate func(T) bool) (Flow, Flow) {
+	flowOne := NewPassThrough()
+	flowTwo := NewPassThrough()
+	go func() {
+		for element := range outlet.Out() {
+			flowOne.In() <- element
+			flowTwo.In() <- element
+		}
+		close(flowOne.In())
+		close(flowTwo.In())
+	}()
+	return flowOne, flowTwo
+}
+
+func SplitByPredicate[T any](outlet Outlet, predicate func(T) bool) [2]Flow {
 	condTrue := NewPassThrough()
 	condFalse := NewPassThrough()
 
