@@ -1,6 +1,6 @@
 package flow
 
-func Split[T any](outlet Outlet, predicate func(T) bool) (Flow, Flow) {
+func Split[T any](outlet Outlet) (Flow, Flow) {
 	flowOne := NewPassThrough()
 	flowTwo := NewPassThrough()
 	go func() {
