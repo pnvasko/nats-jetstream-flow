@@ -280,8 +280,9 @@ LOOP:
 					if ok := message.Ack(); !ok {
 						ss.logger.Ctx(ctx).Sugar().Errorf("failed to Ack message")
 					}
+					flowMsg := flow.NewMessages(message)
 					ss.wg.Add(1)
-					if err := ss.completePool.Invoke(message); err != nil {
+					if err := ss.completePool.Invoke(flowMsg); err != nil {
 						ss.logger.Ctx(ctx).Warn("stream sink failed to invoke processing function for input messages", zap.Error(err))
 						return
 					}
