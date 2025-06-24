@@ -13,6 +13,10 @@ type testMetrics struct {
 	gauge   int64
 }
 
+func (t *testMetrics) Label(params any) (string, error) {
+	return "testMetrics", nil
+}
+
 func newTestMetricsFactory(name string) *testMetrics {
 	m := &testMetrics{
 		counter: 0,
@@ -89,14 +93,14 @@ func TestMetrics(t *testing.T) {
 		scope := "test_scope_create"
 		var opts []StoreOption[*ObjectStore[*testMetrics, *testMetricsInput]]
 		opts = append(opts, WithScope[*ObjectStore[*testMetrics, *testMetricsInput]](scope))
-		m, err := NewObjectStore[*testMetrics, *testMetricsInput](tc.ctx, scope, tc.js, newTestMetricsFactory, tc.tracer, tc.logger, opts...)
+		m, err := NewObjectStore[*testMetrics, *testMetricsInput](tc.ctx, tc.js, newTestMetricsFactory, tc.tracer, tc.logger, opts...)
 		require.NoError(t, err)
 		require.NotNil(t, m)
 		require.Equal(t, scope, m.Scope())
 	})
 
 	t.Run("TestMetrics_IncrAndRead", func(t *testing.T) {
-		m, err := NewObjectStore[*testMetrics, *testMetricsInput](tc.ctx, "test", tc.js, newTestMetricsFactory, tc.tracer, tc.logger)
+		m, err := NewObjectStore[*testMetrics, *testMetricsInput](tc.ctx, tc.js, newTestMetricsFactory, tc.tracer, tc.logger)
 		require.NoError(t, err)
 
 		label := "requests"

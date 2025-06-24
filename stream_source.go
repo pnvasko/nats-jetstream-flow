@@ -296,7 +296,7 @@ func NewStreamSource[T flow.MessageData](ctx context.Context,
 			// No need to Ack/Nak/Term here explicitly due to shutdown. NATS will handle redelivery based on MaxDeliver/AckWait.
 			return // Exit worker goroutine
 		case ss.out <- msg:
-			ss.logger.Ctx(msgSpanCtx).Debug("message sent to output channel", zap.String("stream_source", ss.name))
+			ss.logger.Ctx(msgSpanCtx).Debug("message send to output channel", zap.String("stream_source", ss.name))
 		}
 
 		timeout := time.NewTimer(ss.config.processAckWait)

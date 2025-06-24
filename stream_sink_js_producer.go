@@ -270,17 +270,24 @@ LOOP:
 				ss.wg.Add(1)
 				if err := ss.consumePool.Invoke(future); err != nil {
 					ss.logger.Ctx(ctx).Warn("stream sink failed to invoke processing function for input message", zap.Error(err))
+					future.CloseInner()
+					return
 				}
+
 				errs := futures.Await()
 
-				// todo. select func for Ack or Nack by error
 				if len(errs) == 0 {
 					if ok := message.Ack(); !ok {
-						fmt.Println("TODO.StreamProducerSink.process.message:  failed to Ack message")
+						ss.logger.Ctx(ctx).Sugar().Errorf("failed to Ack message")
+					}
+					ss.wg.Add(1)
+					if err := ss.completePool.Invoke(message); err != nil {
+						ss.logger.Ctx(ctx).Warn("stream sink failed to invoke processing function for input messages", zap.Error(err))
+						return
 					}
 				} else {
 					if ok := message.Nack(); !ok {
-						fmt.Println("TODO.StreamProducerSink.process.message: failed to Nack message")
+						ss.logger.Ctx(ctx).Sugar().Errorf("failed to Nack message")
 					}
 				}
 			case *flow.Messages:
