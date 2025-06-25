@@ -84,10 +84,6 @@ func NewMessage(uuid string, payload []byte, opts ...MessageOption) (*Message, e
 //SetSubject(string)
 //Uuid() string
 
-func (m *Message) Data() interface{} {
-	return m.data
-}
-
 func (m *Message) Marshal() ([]byte, error) {
 	header := make(nats.Header)
 
@@ -272,6 +268,16 @@ func (m *Message) Uuid() string {
 
 func (m *Message) SetUuid(uuid string) {
 	m.uuid = uuid
+}
+
+func (m *Message) Data() interface{} {
+	return m.data
+}
+
+func (m *Message) SetData(data interface{}) {
+	m.mu.Lock()
+	m.data = data
+	m.mu.Unlock()
 }
 
 func (m *Message) Subject() (string, error) {
