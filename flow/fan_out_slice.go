@@ -11,7 +11,6 @@ type FanOutSlice[T any] struct {
 	ctx       context.Context
 	in        chan any
 	out       chan any
-	wg        *common.SafeWaitGroup
 	errorsCh  chan error
 	convertFn func(any) ([]T, error)
 	logger    common.Logger
@@ -22,7 +21,6 @@ func NewFanOutSlice[T any](ctx context.Context, convertFn func(any) ([]T, error)
 		ctx:       ctx,
 		in:        make(chan any),
 		out:       make(chan any),
-		wg:        wg,
 		errorsCh:  errorsCh,
 		convertFn: convertFn,
 		logger:    logger,
@@ -56,7 +54,6 @@ func (pt *FanOutSlice[T]) Out() <-chan any {
 
 func (pt *FanOutSlice[T]) transmit(inlet Input) {
 	defer close(inlet.In())
-
 	for element := range pt.Out() {
 		data, err := pt.convertFn(element)
 		if err != nil {
@@ -64,7 +61,6 @@ func (pt *FanOutSlice[T]) transmit(inlet Input) {
 			pt.errorsCh <- err
 			return
 		}
-		pt.wg.Add(len(data))
 		for _, elm := range data {
 			select {
 			case <-pt.ctx.Done():
