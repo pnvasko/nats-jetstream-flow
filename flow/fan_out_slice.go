@@ -16,7 +16,7 @@ type FanOutSlice[T any] struct {
 	logger    common.Logger
 }
 
-func NewFanOutSlice[T any](ctx context.Context, convertFn func(any) ([]T, error), wg *common.SafeWaitGroup, errorsCh chan error, logger common.Logger) *FanOutSlice[T] {
+func NewFanOutSlice[T any](ctx context.Context, convertFn func(any) ([]T, error), errorsCh chan error, logger common.Logger) *FanOutSlice[T] {
 	passThrough := &FanOutSlice[T]{
 		ctx:       ctx,
 		in:        make(chan any),
