@@ -144,7 +144,7 @@ LOOP:
 			return
 		case msg, ok := <-fos.in:
 			if !ok {
-				fos.logger.Ctx(ctx).Warn("stream sink received message from a context cancelled")
+				fos.logger.Ctx(ctx).Debug("stream sink received message from a context cancelled")
 				return
 			}
 
@@ -155,7 +155,7 @@ LOOP:
 				msgs.Messages = append(msgs.Messages, message)
 				mm, ok := msgs.Messages[0].(T)
 				if !ok {
-					fos.logger.Ctx(ctx).Warn("stream sink build message")
+					fos.logger.Ctx(ctx).Debug("stream sink build message")
 					break LOOP
 				}
 				future := NewFuture[T](mm.Context(), mm)
@@ -170,7 +170,7 @@ LOOP:
 
 				errs := futures.Await()
 				if len(errs) == 0 {
-					fos.logger.Ctx(ctx).Warn("success processed.")
+					fos.logger.Ctx(ctx).Debug("success processed.")
 				} else {
 					fos.logger.Ctx(ctx).Sugar().Errorf("failed processed with %d errors.", len(errs))
 				}
