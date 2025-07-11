@@ -14,6 +14,7 @@ import (
 	"google.golang.org/protobuf/types/known/anypb"
 	"google.golang.org/protobuf/types/known/wrapperspb"
 	"sync"
+	"time"
 )
 
 var doneOnce sync.Once
@@ -48,9 +49,9 @@ type Message struct {
 
 	ackMutex    sync.Mutex
 	ackSentType AckType
-
-	errMutex sync.Mutex
-	err      error
+	nackDelay   time.Duration
+	errMutex    sync.Mutex
+	err         error
 }
 
 type MessageOption func(*Message) error
@@ -312,6 +313,14 @@ func (m *Message) Context() context.Context {
 
 func (m *Message) SetContext(ctx context.Context) {
 	m.ctx = ctx
+}
+
+func (m *Message) SetNackDelay(t time.Duration) {
+	m.nackDelay = t
+}
+
+func (m *Message) GetNackDelay() time.Duration {
+	return m.nackDelay
 }
 
 func (m *Message) Metadata() map[string]string {

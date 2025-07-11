@@ -331,7 +331,11 @@ func NewStreamSource[T flow.MessageData](ctx context.Context,
 			var nakDelay time.Duration = 0 // Default to Nak immediately (delay 0)
 			var retryNum uint64 = 0
 
-			if ss.config.nakDelay != nil {
+			if msg.GetNackDelay() > 0 {
+				nakDelay = msg.GetNackDelay()
+				attrs = append(attrs, attribute.String("stream_source.message.msg_delay", nakDelay.String()))
+				attrs = append(attrs, attribute.Int64("stream_source.message.retryNum", int64(retryNum)))
+			} else if ss.config.nakDelay != nil {
 				if numDelivered > 0 {
 					retryNum = numDelivered // NumDelivered is the retry count (1-based)
 					nakDelay = ss.config.nakDelay.WaitTime(retryNum)

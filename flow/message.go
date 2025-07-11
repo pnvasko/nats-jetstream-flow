@@ -1,6 +1,9 @@
 package flow
 
-import "context"
+import (
+	"context"
+	"time"
+)
 
 type MessageData interface {
 	MarshalVT() ([]byte, error)
@@ -25,6 +28,8 @@ type Message interface {
 	Nacked() <-chan struct{}
 	Done() <-chan struct{}
 	Data() interface{}
+	SetNackDelay(time.Duration)
+	GetNackDelay() time.Duration
 	Marshal() ([]byte, error)
 	Unmarshal([]byte) error
 }
