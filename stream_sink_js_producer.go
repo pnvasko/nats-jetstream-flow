@@ -277,6 +277,7 @@ LOOP:
 				errs := futures.Await()
 
 				if len(errs) == 0 {
+					message.Done()
 					if ok := message.Ack(); !ok {
 						ss.logger.Ctx(ctx).Sugar().Errorf("failed to Ack message")
 					}

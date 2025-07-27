@@ -34,8 +34,6 @@ func ReadSlice[T any](ctx context.Context, ch <-chan any) []T {
 	var result []T
 	for {
 		select {
-		//case <-ctx.Done():
-		//	return result
 		case v, ok := <-ch:
 			if !ok {
 				fmt.Println("readSlice chan close.")

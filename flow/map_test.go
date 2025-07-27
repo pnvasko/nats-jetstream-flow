@@ -18,7 +18,7 @@ func TestMapMessage(t *testing.T) {
 	logConfig, err := common.NewDevOtlpConfig()
 	require.NoError(t, err)
 
-	logger, _ := common.NewLogger(logConfig)
+	logger, _ := common.NewLibLogger(logConfig)
 	tracer := trace.NewNoopTracerProvider().Tracer("test.map.tracer")
 	in := make(chan any)
 
