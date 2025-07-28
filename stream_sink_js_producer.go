@@ -273,9 +273,7 @@ LOOP:
 					future.CloseInner()
 					return
 				}
-
 				errs := futures.Await()
-
 				if len(errs) == 0 {
 					message.Done()
 					if ok := message.Ack(); !ok {
@@ -288,6 +286,10 @@ LOOP:
 						return
 					}
 				} else {
+					ss.logger.Ctx(ctx).Sugar().Errorf("stream sink total errors [%d] : ", len(errs))
+					for _, err := range errs {
+						ss.logger.Ctx(ctx).Error("stream sink error: ", zap.Error(err))
+					}
 					if ok := message.Nack(); !ok {
 						ss.logger.Ctx(ctx).Sugar().Errorf("failed to Nack message")
 					}
@@ -310,7 +312,6 @@ LOOP:
 						return
 					}
 				}
-
 				errs := futures.Await()
 				// todo. select func for Ack or Nack by error
 				if len(errs) == 0 {
@@ -324,6 +325,10 @@ LOOP:
 						return
 					}
 				} else {
+					ss.logger.Ctx(ctx).Sugar().Errorf("stream sink messages total errors [%d] : ", len(errs))
+					for _, err := range errs {
+						ss.logger.Ctx(ctx).Error("stream sink messages error: ", zap.Error(err))
+					}
 					if ok := message.OriginalMessage.Nack(); !ok {
 						ss.logger.Ctx(ctx).Sugar().Errorf("failed to Nack message")
 					}
