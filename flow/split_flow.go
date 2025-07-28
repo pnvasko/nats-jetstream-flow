@@ -18,10 +18,15 @@ type splitFlowTask struct {
 	Handler *SplitFlowPredicateHandler
 	Data    any
 }
+
+type SubFlowDefenition struct {
+	In   Input
+	Flow Flow
+}
 type SplitFlowHandlers map[string]*SplitFlowPredicateHandler
 type SplitFlowPredicateHandler struct {
 	Predicate func(any) bool
-	Flow      Flow
+	Flow      *SubFlowDefenition
 }
 
 type SplitByPredicateFlow struct {
@@ -50,10 +55,12 @@ func NewSplitByPredicateFlow(ctx context.Context, handlers SplitFlowHandlers, lo
 			sf.logger.Ctx(sf.ctx).Sugar().Errorf("failed to cast interface [%T] to T", im)
 			return
 		}
-		task.Handler.Flow.In() <- task.Data
+
+		task.Handler.Flow.In.In() <- task.Data
+		// task.Handler.Flow.In <- task.Data
 
 		select {
-		case out := <-task.Handler.Flow.Out():
+		case out := <-task.Handler.Flow.Flow.Out():
 			sf.out <- out
 		case <-time.After(sf.timeout):
 			sf.logger.Ctx(sf.ctx).Sugar().Errorf("timeout receiving from flow.Out() for element %v", task.Data)
