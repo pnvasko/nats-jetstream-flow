@@ -28,6 +28,7 @@ type Message interface {
 	Nacked() <-chan struct{}
 	Done() <-chan struct{}
 	Data() interface{}
+	SetData(interface{})
 	SetNackDelay(time.Duration)
 	GetNackDelay() time.Duration
 	Marshal() ([]byte, error)
