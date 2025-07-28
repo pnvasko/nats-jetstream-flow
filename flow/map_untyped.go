@@ -51,7 +51,7 @@ type MapUnTyped struct {
 	logger common.Logger
 }
 
-func NewMapUnTyped[T, R any](baseCtx context.Context, mapFunction func(any) (any, error), poolSizePerPool int, tracer trace.Tracer, logger common.Logger, opts ...MapUnTypedOption) (*MapUnTyped, error) {
+func NewMapUnTyped(baseCtx context.Context, mapFunction func(any) (any, error), poolSizePerPool int, tracer trace.Tracer, logger common.Logger, opts ...MapUnTypedOption) (*MapUnTyped, error) {
 	var err error
 
 	m := &MapUnTyped{
