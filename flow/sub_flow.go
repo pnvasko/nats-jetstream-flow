@@ -5,6 +5,7 @@ import "time"
 type SubFlowDefinition struct {
 	Input Input
 	Flow  Flow
+	Close func() error
 }
 
 func (sf *SubFlowDefinition) Out() <-chan any {
