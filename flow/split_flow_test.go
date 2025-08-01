@@ -60,34 +60,6 @@ func sinkHandler(t *testing.T, artifacts []*testMessage, complete chan struct{})
 	}
 }
 
-func (sf *SubFlowDefinition) Out() <-chan any {
-	return sf.Flow.Out()
-}
-
-func (sf *SubFlowDefinition) In() chan<- any {
-	return sf.Input.In()
-}
-
-func (sf *SubFlowDefinition) To(sink Sink) {
-	sf.transmit(sink)
-	err := sink.AwaitCompletion(60 * time.Second)
-	if err != nil {
-		return
-	}
-}
-
-func (sf *SubFlowDefinition) Via(next Flow) Flow {
-	go sf.transmit(next)
-	return next
-}
-
-func (sf *SubFlowDefinition) transmit(inlet Input) {
-	for element := range sf.Out() {
-		inlet.In() <- element
-	}
-	close(inlet.In())
-}
-
 func TestSubFlowDefinition(t *testing.T) {
 	setEnvironment(t, "TestSubFlowDefinition")
 	flowCtx, flowCancel := context.WithCancel(context.Background())

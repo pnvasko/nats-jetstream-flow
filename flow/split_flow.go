@@ -19,10 +19,6 @@ type splitFlowTask struct {
 	Data    any
 }
 
-type SubFlowDefinition struct {
-	Input Input
-	Flow  Flow
-}
 type SplitFlowHandlers map[string]*SplitFlowPredicateHandler
 type SplitFlowPredicateHandler struct {
 	Predicate func(any) bool
