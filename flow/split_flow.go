@@ -19,14 +19,14 @@ type splitFlowTask struct {
 	Data    any
 }
 
-type SubFlowDefenition struct {
-	In   Input
-	Flow Flow
+type SubFlowDefinition struct {
+	Input Input
+	Flow  Flow
 }
 type SplitFlowHandlers map[string]*SplitFlowPredicateHandler
 type SplitFlowPredicateHandler struct {
 	Predicate func(any) bool
-	Flow      *SubFlowDefenition
+	Flow      *SubFlowDefinition
 }
 
 type SplitByPredicateFlow struct {
@@ -56,7 +56,7 @@ func NewSplitByPredicateFlow(ctx context.Context, handlers SplitFlowHandlers, lo
 			return
 		}
 
-		task.Handler.Flow.In.In() <- task.Data
+		task.Handler.Flow.Input.In() <- task.Data
 		// task.Handler.Flow.In <- task.Data
 
 		select {

@@ -17,7 +17,7 @@ func (t *testMetrics) Label(params any) (string, error) {
 	return "testMetrics", nil
 }
 
-func newTestMetricsFactory(name string) *testMetrics {
+func newTestMetricsFactory() *testMetrics {
 	m := &testMetrics{
 		counter: 0,
 		gauge:   0,
@@ -103,7 +103,7 @@ func TestMetrics(t *testing.T) {
 		m, err := NewObjectStore[*testMetrics, *testMetricsInput](tc.ctx, tc.js, newTestMetricsFactory, tc.tracer, tc.logger)
 		require.NoError(t, err)
 
-		label := "requests"
+		label := &LabelParams{Label: "requests"}
 		incrReq := &testMetricsInput{
 			counter: 5,
 			gauge:   10,
