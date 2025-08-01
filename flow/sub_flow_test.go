@@ -61,7 +61,7 @@ func sinkHandler(t *testing.T, artifacts []*testMessage, complete chan struct{})
 }
 
 func TestSubFlowDefinition(t *testing.T) {
-	setEnvironment(t, "TestSubFlowDefinition")
+	setEnvironment(t, "TestSubFlowDefinition.v1")
 	flowCtx, flowCancel := context.WithCancel(context.Background())
 	// flowCtx, flowCancel := context.WithTimeout(context.Background(), 1*time.Second)
 	defer flowCancel()
