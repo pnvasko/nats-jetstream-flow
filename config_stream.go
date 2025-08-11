@@ -1,8 +1,9 @@
 package nats_jetstream_flow
 
 import (
-	"github.com/nats-io/nats.go/jetstream"
 	"time"
+
+	"github.com/nats-io/nats.go/jetstream"
 )
 
 const (
@@ -80,6 +81,13 @@ func WithDuplicateWindow(td time.Duration) StreamConfigOption {
 	}
 }
 
+func WithAllowMsgTTL(v bool) StreamConfigOption {
+	return func(cfg *StreamConfig) error {
+		cfg.allowMsgTTL = v
+		return nil
+	}
+}
+
 type StreamConfig struct {
 	streamName                  string
 	subjects                    []string
@@ -92,6 +100,7 @@ type StreamConfig struct {
 	streamReplicas              int
 	cleanupTTL                  time.Duration
 	duplicateWindow             time.Duration
+	allowMsgTTL                 bool
 }
 
 func NewStreamConfig(streamName string, subjects []string, opts ...StreamConfigOption) (*StreamConfig, error) {
@@ -106,6 +115,7 @@ func NewStreamConfig(streamName string, subjects []string, opts ...StreamConfigO
 		streamReplicas:              1,
 		discardPolicyMsgsPerSubject: true,
 		cleanupTTL:                  defaultCleanupTTL,
+		allowMsgTTL:                 false,
 	}
 
 	for _, opt := range opts {
@@ -161,6 +171,10 @@ func (sc StreamConfig) StreamDuplicatesWindow() time.Duration {
 	return sc.duplicateWindow
 }
 
+func (sc StreamConfig) AllowMsgTTL() bool {
+	return sc.allowMsgTTL
+}
+
 var _ StreamConfiguration = (*StreamConfig)(nil)
 
 type StreamConfiguration interface {
@@ -175,4 +189,5 @@ type StreamConfiguration interface {
 	StreamStorageType() jetstream.StorageType
 	StreamReplicas() int
 	StreamDuplicatesWindow() time.Duration
+	AllowMsgTTL() bool
 }

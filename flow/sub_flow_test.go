@@ -96,7 +96,12 @@ func TestSubFlowDefinition(t *testing.T) {
 	err = sink.Run()
 	assert.NoError(t, err)
 
+	var subFlow *SubFlowDefinition
 	defer func() {
+		if subFlow != nil && subFlow.Close != nil {
+			err = subFlow.Close()
+			require.NoError(t, err)
+		}
 		err = sink.AwaitCompletion(10 * time.Second)
 		require.NoError(t, err)
 		err = sink.Close(context.Background())
@@ -144,7 +149,7 @@ func TestSubFlowDefinition(t *testing.T) {
 	err = transformStep.Run()
 	require.NoError(t, err)
 
-	subFlow := &SubFlowDefinition{
+	subFlow = &SubFlowDefinition{
 		Input: normalizeStep,
 		Flow:  normalizeStep.Via(enrichStep).Via(transformStep),
 	}
