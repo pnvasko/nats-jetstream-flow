@@ -427,12 +427,7 @@ func (ss *StreamSource[T]) Run() error {
 }
 
 func (ss *StreamSource[T]) RunCtx(ctx context.Context) error {
-	ss.wg.Add(1)
-	go func() {
-		defer ss.wg.Done()
-		ss.process(ctx) // assuming process takes ctx
-	}()
-
+	go ss.process(ctx) // assuming process takes ctx
 	return nil
 }
 
