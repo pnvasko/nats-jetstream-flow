@@ -3,18 +3,21 @@ package nats_jetstream_flow
 import (
 	"context"
 	"fmt"
+
+	"runtime"
+	"strings"
+	"sync"
+	"time"
+
 	"github.com/nats-io/nats.go/jetstream"
 	"github.com/panjf2000/ants/v2"
 	"github.com/pnvasko/nats-jetstream-flow/common"
 	"github.com/pnvasko/nats-jetstream-flow/flow"
 	"go.opentelemetry.io/otel/attribute"
+
 	// "go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
 	"go.uber.org/zap"
-	"runtime"
-	"strings"
-	"sync"
-	"time"
 )
 
 const (
@@ -147,6 +150,7 @@ type StreamSource[T flow.MessageData] struct {
 	mu        *sync.RWMutex
 	closeOnce sync.Once
 	closing   chan struct{}
+	done      chan struct{}
 	closed    bool
 
 	name            string
@@ -181,9 +185,9 @@ func NewStreamSource[T flow.MessageData](ctx context.Context,
 		spanName:        spanName,
 		mu:              &sync.RWMutex{},
 		closing:         make(chan struct{}),
-		closed:          false,
-		config:          config,
+		done:            make(chan struct{}),
 		out:             make(chan any, config.outputChannelBufferSize),
+		config:          config,
 		poolSize:        config.poolSize,
 		poolSizePerPool: config.poolSizePerPool,
 		tracer:          tracer,
@@ -225,8 +229,8 @@ func NewStreamSource[T flow.MessageData](ctx context.Context,
 			ss.logger.Ctx(job.ctx).Error("failed to set message in progress", zap.Error(err), zap.String("stream_source", ss.name))
 			return
 		}
-		msg, err := LoadNatsMessage[T](job.jsMsg)
 
+		msg, err := LoadNatsMessage[T](job.jsMsg)
 		if err != nil {
 			ss.logger.Ctx(job.ctx).Error("cannot unmarshal message", zap.Error(err), zap.String("stream_source", ss.name))
 			if err := job.jsMsg.Nak(); err != nil {
@@ -264,6 +268,17 @@ func NewStreamSource[T flow.MessageData](ctx context.Context,
 		subject, err := msg.Subject()
 		if err != nil {
 			ss.logger.Ctx(msgSpanCtx).Error("failed to get message subject", zap.Error(err), zap.String("stream_source", ss.name))
+			_ = job.jsMsg.Nak()
+			return
+		}
+
+		// fast exit if closed
+		ss.mu.RLock()
+		isClosed := ss.closed
+		ss.mu.RUnlock()
+		if isClosed {
+			ss.logger.Ctx(msgSpanCtx).Debug("closed, message discarded", zap.String("stream_source", ss.name))
+			_ = job.jsMsg.Nak()
 			return
 		}
 
@@ -275,14 +290,6 @@ func NewStreamSource[T flow.MessageData](ctx context.Context,
 		attrs = append(attrs, attribute.String("stream_source.message.delivered", msg.GetMessageMetadata(DefaultNumDeliveredKey)))
 		attrs = append(attrs, attribute.String("stream_source.message.pending", msg.GetMessageMetadata(DefaultNumPendingKey)))
 		attrs = append(attrs, attribute.Int("stream_source.message.len", len(msg.Payload())))
-
-		ss.mu.RLock()
-		closed := ss.closed
-		ss.mu.RUnlock()
-		if closed {
-			ss.logger.Ctx(msgSpanCtx).Debug("closed, message discarded", zap.String("stream_source", ss.name))
-			return
-		}
 
 		select {
 		case <-ss.closing:
@@ -416,13 +423,7 @@ func (ss *StreamSource[T]) Out() <-chan any {
 }
 
 func (ss *StreamSource[T]) Run() error {
-	ss.wg.Add(1)
-	go func() {
-		defer ss.wg.Done()
-		ss.process(ss.ctx) // assuming process takes ctx
-	}()
-
-	return nil
+	return ss.RunCtx(ss.ctx)
 }
 
 func (ss *StreamSource[T]) RunCtx(ctx context.Context) error {
@@ -436,23 +437,36 @@ func (ss *StreamSource[T]) RunCtx(ctx context.Context) error {
 }
 
 func (ss *StreamSource[T]) Close(ctx context.Context) error {
-	waitChan := make(chan struct{})
-	go func() {
-		ss.wg.Wait()
-		close(waitChan)
-	}()
+	ss.closeOnce.Do(func() {
+		ss.mu.Lock()
+		ss.closed = true
+		ss.mu.Unlock()
+		close(ss.closing)
+		ss.cancel()
+	})
 
 	select {
-	case <-ctx.Done():
-		ss.closeOnce.Do(func() { ss.cancel() })
-		return ctx.Err()
-	case <-waitChan:
-		ss.closeOnce.Do(func() { ss.cancel() })
+	case <-ss.done:
+		ants.Release()
 		return nil
+	case <-ctx.Done():
+		ants.Release()
+		return ctx.Err()
 	}
 }
 
 func (ss *StreamSource[T]) AwaitCompletion(timeout time.Duration) error {
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	select {
+	case <-ss.done:
+		return nil
+	case <-timer.C:
+		return fmt.Errorf("timeout waiting for completion")
+	}
+}
+
+func (ss *StreamSource[T]) xAwaitCompletion(timeout time.Duration) error {
 	fmt.Println("StreamSource.AwaitCompletion...")
 	deadline := time.After(timeout)
 
@@ -498,10 +512,7 @@ func (ss *StreamSource[T]) process(ctx context.Context) {
 	}()
 
 	consumeContext, err := ss.consumer.Consume(func(msg jetstream.Msg) {
-		job := &streamSourceJob{
-			ctx:   processCtx,
-			jsMsg: msg,
-		}
+		job := &streamSourceJob{ctx: processCtx, jsMsg: msg}
 		ss.wg.Add(1)
 		if err := ss.pool.Invoke(job); err != nil {
 			ss.wg.Done()
@@ -522,7 +533,9 @@ func (ss *StreamSource[T]) process(ctx context.Context) {
 	}()
 
 	<-processCtx.Done()
+	ss.wg.Wait()
 	ss.logger.Ctx(processCtx).Debug("process finished")
+	close(ss.done)
 }
 
 var _ flow.Source = (*StreamSource[flow.MessageData])(nil)
