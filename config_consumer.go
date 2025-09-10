@@ -92,6 +92,13 @@ func WithBackOff(nn []int) ConsumerConfigOption {
 	}
 }
 
+func WithInactiveThreshold(v time.Duration) ConsumerConfigOption {
+	return func(cfg *ConsumerConfig) error {
+		cfg.inactiveThreshold = v
+		return nil
+	}
+}
+
 type ConsumerConfig struct {
 	streamName        string
 	filterSubjects    []string
