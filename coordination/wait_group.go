@@ -4,18 +4,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"github.com/nats-io/nats.go/jetstream"
-	"github.com/pnvasko/nats-jetstream-flow/common"
-	"go.opentelemetry.io/otel/trace"
 	"strconv"
 	"sync"
 	"time"
-)
 
-const (
-	defaultWaitGroupBucketPrefix = "wait_group"
-	defaultWaitGroupScope        = "default"
-	defaultCleanupTTL            = 7 * 24 * time.Hour
+	"github.com/nats-io/nats.go/jetstream"
+	"github.com/pnvasko/nats-jetstream-flow/common"
+	"go.opentelemetry.io/otel/trace"
 )
 
 type WaitGroup struct {

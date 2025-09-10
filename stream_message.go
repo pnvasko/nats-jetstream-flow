@@ -4,6 +4,9 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"sync"
+	"time"
+
 	"github.com/nats-io/nats.go"
 	"github.com/pnvasko/nats-jetstream-flow/flow"
 	streamProto "github.com/pnvasko/nats-jetstream-flow/proto/v1"
@@ -13,8 +16,6 @@ import (
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/anypb"
 	"google.golang.org/protobuf/types/known/wrapperspb"
-	"sync"
-	"time"
 )
 
 var doneOnce sync.Once

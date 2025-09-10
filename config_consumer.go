@@ -2,16 +2,18 @@ package nats_jetstream_flow
 
 import (
 	"fmt"
+	"time"
+
 	"github.com/nats-io/nats.go/jetstream"
 	"github.com/rs/xid"
-	"time"
 )
 
 const (
-	defaultAckWait       = time.Second * 30
-	defaultMaxDeliver    = 5
-	defaultDeliverPolicy = jetstream.DeliverAllPolicy
-	defaultAckPolicy     = jetstream.AckExplicitPolicy
+	defaultAckWait           = time.Second * 30
+	defaultMaxDeliver        = 5
+	defaultDeliverPolicy     = jetstream.DeliverAllPolicy
+	defaultAckPolicy         = jetstream.AckExplicitPolicy
+	defaultInactiveThreshold = 7 * 24 * time.Hour
 )
 
 type ConsumerConfigOption func(*ConsumerConfig) error
@@ -91,14 +93,15 @@ func WithBackOff(nn []int) ConsumerConfigOption {
 }
 
 type ConsumerConfig struct {
-	streamName     string
-	filterSubjects []string
-	consumerName   string
-	durableName    string
-	ackPolicy      jetstream.AckPolicy
-	deliverPolicy  jetstream.DeliverPolicy
-	pullOptions    []jetstream.PullConsumeOpt
-	maxDeliver     int
+	streamName        string
+	filterSubjects    []string
+	consumerName      string
+	durableName       string
+	ackPolicy         jetstream.AckPolicy
+	deliverPolicy     jetstream.DeliverPolicy
+	pullOptions       []jetstream.PullConsumeOpt
+	maxDeliver        int
+	inactiveThreshold time.Duration
 
 	backOff []time.Duration
 
@@ -107,12 +110,13 @@ type ConsumerConfig struct {
 
 func NewConsumerConfig(streamName string, subjects []string, opts ...ConsumerConfigOption) (*ConsumerConfig, error) {
 	cfg := &ConsumerConfig{
-		streamName:     streamName,
-		filterSubjects: subjects,
-		deliverPolicy:  defaultDeliverPolicy,
-		ackWait:        defaultAckWait,
-		ackPolicy:      defaultAckPolicy,
-		maxDeliver:     defaultMaxDeliver,
+		streamName:        streamName,
+		filterSubjects:    subjects,
+		deliverPolicy:     defaultDeliverPolicy,
+		ackWait:           defaultAckWait,
+		ackPolicy:         defaultAckPolicy,
+		maxDeliver:        defaultMaxDeliver,
+		inactiveThreshold: defaultInactiveThreshold,
 	}
 
 	for _, opt := range opts {
@@ -176,6 +180,10 @@ func (cfg ConsumerConfig) PullOptions() []jetstream.PullConsumeOpt {
 	return cfg.pullOptions
 }
 
+func (cfg ConsumerConfig) InactiveThreshold() time.Duration {
+	return cfg.inactiveThreshold
+}
+
 var _ ConsumerConfiguration = (*ConsumerConfig)(nil)
 
 type ConsumerConfiguration interface {
@@ -189,4 +197,5 @@ type ConsumerConfiguration interface {
 	MaxDeliver() int
 	BackOff() []time.Duration
 	PullOptions() []jetstream.PullConsumeOpt
+	InactiveThreshold() time.Duration
 }

@@ -39,6 +39,8 @@ func CreateOrUpdateConsumer(ctx context.Context, js jetstream.JetStream, config 
 
 	if config.DurableName() != "" {
 		consumerConfig.Durable = config.DurableName()
+	} else {
+		consumerConfig.InactiveThreshold = config.InactiveThreshold()
 	}
 
 	if len(config.BackOff()) > 0 {
