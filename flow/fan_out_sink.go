@@ -184,12 +184,30 @@ func (fos *FanOutSink[T]) process(ctx context.Context) {
 				fos.logger.Ctx(ctx).Warn("fanout sink: submit to pool failed", zap.Error(err))
 				return
 			}
-			errs := futures.Await()
-			if len(errs) == 0 {
-				fos.logger.Ctx(ctx).Debug("success processed.")
-			} else {
-				fos.logger.Ctx(ctx).Sugar().Errorf("failed processed with %d errors.", len(errs))
+
+			select {
+			case <-future.Inner():
+			case <-fos.closing:
+				return
+			case <-fos.ctx.Done():
+				return
 			}
+
+			// The pool goroutine writes future.err before close(ch) (SetError) or leaves it nil (CloseInner),
+			// so this read happens after the write.
+			if err := future.err; err != nil {
+				fos.logger.Ctx(ctx).Error("fanout sink: consume failed", zap.Error(err))
+			} else {
+				fos.logger.Ctx(ctx).Debug("success processed.")
+			}
+
+			// errs := futures.Await()
+
+			//if len(errs) == 0 {
+			//	fos.logger.Ctx(ctx).Debug("success processed.")
+			//} else {
+			//	fos.logger.Ctx(ctx).Sugar().Errorf("failed processed with %d errors.", len(errs))
+			//}
 		}
 	}
 }
